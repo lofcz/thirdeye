@@ -30,8 +30,11 @@ ThirdEye.CaptureToFile("screenshot.png");
 Options are available:
 
 ```cs
-var bypassOptions = new ThirdEyeOptions(format: ThirdeyeFormat.Jpeg, quality: 90, bypassProtection: true);
-ThirdEye.CaptureToFile("screenshot.jpeg", bypassOptions);
+ThirdEye.CaptureToFile("screenshot.jpeg", new ThirdEyeOptions(
+  format: ThirdeyeFormat.Jpeg,
+  quality: 90,
+  bypassProtection: true
+));
 ```
 
 If needed, screenshots can be stored in memory:
