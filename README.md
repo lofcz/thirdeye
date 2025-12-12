@@ -1,3 +1,5 @@
+[![ThirdEye](https://shields.io/nuget/v/ThirdEye?v=302&icon=nuget&label=ThirdEye)](https://www.nuget.org/packages/ThirdEye)
+
 # Third Eye
 
 Usermode `WDA_MONITOR`/`WDA_EXCLUDEFROMCAPTURE` bypasser using undocumented Windows functions with C# bindings.
