@@ -1,3 +1,3 @@
 # Third Eye
 
-POC of usermode `WDA_EXCLUDE_FROM_CAPTURE` bypasser using undocumented Windows functions.
+POC of usermode `WDA_MONITOR`/`WDA_EXCLUDEFROMCAPTURE` bypasser using undocumented Windows functions.
