@@ -2,3 +2,4 @@ cmake-build-debug
 .idea
 .vs
 .code
+/cmake-build-release

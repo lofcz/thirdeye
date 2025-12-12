@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <ItemGroup Condition="'$(OS)' == 'Windows_NT'">
+    <None Include="$(MSBuildThisFileDirectory)..\runtimes\win-x64\native\thirdeye_native.dll"
+          Condition="Exists('$(MSBuildThisFileDirectory)..\runtimes\win-x64\native\thirdeye_native.dll')">
+      <TargetPath>thirdeye_native.dll</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
+
+</Project>
+

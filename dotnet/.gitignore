@@ -1,0 +1,37 @@
+# Build results
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Rider
+.idea/
+*.sln.iml
+
+# Test Results
+[Tt]est[Rr]esult*/
+*.trx
+
+# Build artifacts
+artifacts/
+publish/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Keep native DLL placeholder
+!src/ThirdEye/runtimes/win-x64/native/.gitkeep
+

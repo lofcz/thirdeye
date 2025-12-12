@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ThirdEye/ThirdEye.csproj" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/ThirdEye.Demo/ThirdEye.Demo.csproj" />
+  </Folder>
+</Solution>
+

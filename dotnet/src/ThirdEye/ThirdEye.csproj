@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <RootNamespace>ThirdEye</RootNamespace>
+    <AssemblyName>ThirdEye</AssemblyName>
+    <PackageId>ThirdEye</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>Matěj "lofcz" Štágl</Authors>
+    <Description>Screen capture library bypassing WDA_MONITOR/WDA_EXCLUDEFROMCAPTURE</Description>
+    <PackageTags>screenshot;screen-capture;windows;bypass;display-affinity</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/lofcz/thirdeye</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/lofcz/thirdeye</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+  
+  <ItemGroup>
+    <None Include="runtimes\win-x64\native\thirdeye_native.dll" 
+          Pack="true" 
+          PackagePath="runtimes\win-x64\native" 
+          Condition="Exists('runtimes\win-x64\native\thirdeye_native.dll')" />
+  </ItemGroup>
+  
+  <ItemGroup Condition="'$(OS)' == 'Windows_NT'">
+    <None Include="runtimes\win-x64\native\thirdeye_native.dll"
+          Condition="Exists('runtimes\win-x64\native\thirdeye_native.dll')">
+      <TargetPath>thirdeye_native.dll</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="build\ThirdEye.targets" Pack="true" PackagePath="build" />
+    <None Include="build\ThirdEye.targets" Pack="true" PackagePath="buildTransitive" />
+  </ItemGroup>
+
+</Project>
+
