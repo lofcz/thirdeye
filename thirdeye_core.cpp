@@ -6,6 +6,7 @@
 #include <chrono>
 #include <mutex>
 #include <atomic>
+#include <thread>
 
 using namespace Gdiplus;
 
@@ -452,7 +453,28 @@ static BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
     return TRUE;
 }
 
-static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger) {
+static bool IsProcessBlacklisted(DWORD pid) {
+    return pid <= 4;
+}
+
+static void CleanupInjections(std::vector<RemoteContext>& injections) {
+    if (injections.empty()) return;
+
+    for (const auto& ctx : injections) {
+        if (ctx.hThread) {
+            if (NtWaitDirect(ctx.hThread, 200) == WAIT_OBJECT_0) {
+                if (ctx.pRemoteCode) NtFreeMemoryDirect(ctx.hProcess, ctx.pRemoteCode);
+                if (ctx.pRemoteData) NtFreeMemoryDirect(ctx.hProcess, ctx.pRemoteData);
+            }
+            NtCloseDirect(ctx.hThread);
+        }
+
+        if (ctx.hProcess) NtCloseDirect(ctx.hProcess);
+    }
+    injections.clear();
+}
+
+static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger, std::vector<RemoteContext>& activeInjections) {
     std::map<DWORD, std::vector<HWND>> processWindows;
     EnumWindows(EnumWindowsProc, (LPARAM)&processWindows);
 
@@ -467,8 +489,6 @@ static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger)
         return false;
     }
 
-    std::vector<RemoteContext> activeInjections;
-
     size_t sectionSize = GetRemoteSectionSize();
     if (sectionSize == 0) {
         SetLastErrorMsg(ctx, ".remote section not found");
@@ -476,6 +496,8 @@ static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger)
     }
 
     for (auto const& [pid, hwnds] : processWindows) {
+        if (IsProcessBlacklisted(pid)) continue;
+
         HANDLE hProcess = NtOpenProcessDirect(pid, PROCESS_ALL_ACCESS);
         if (!hProcess) continue;
 
@@ -702,10 +724,11 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToFile(
     }
 
     HandleGuard hGlobalTrigger;
+    std::vector<RemoteContext> injections;
     if (opts.bypassProtection) {
         hGlobalTrigger = HandleGuard(CreateEventA(nullptr, TRUE, FALSE, nullptr));
         if (hGlobalTrigger) {
-            BypassDisplayProtection(context, hGlobalTrigger.get());
+            BypassDisplayProtection(context, hGlobalTrigger.get(), injections);
         }
     }
 
@@ -723,6 +746,9 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToFile(
 
     if (opts.bypassProtection && hGlobalTrigger) {
         SetEvent(hGlobalTrigger.get());
+        std::thread([injections = std::move(injections)]() mutable {
+            CleanupInjections(injections);
+        }).detach();
     }
 
     Bitmap bitmap(hbm, nullptr);
@@ -787,10 +813,11 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToBuffer(
     }
 
     HandleGuard hGlobalTrigger;
+    std::vector<RemoteContext> injections;
     if (opts.bypassProtection) {
         hGlobalTrigger = HandleGuard(CreateEventA(nullptr, TRUE, FALSE, nullptr));
         if (hGlobalTrigger) {
-            BypassDisplayProtection(context, hGlobalTrigger.get());
+            BypassDisplayProtection(context, hGlobalTrigger.get(), injections);
         }
     }
 
@@ -798,6 +825,9 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToBuffer(
     if (CreateStreamOnHGlobal(nullptr, TRUE, &stream) != S_OK) {
         if (opts.bypassProtection && hGlobalTrigger) {
             SetEvent(hGlobalTrigger.get());
+            std::thread([injections = std::move(injections)]() mutable {
+                CleanupInjections(injections);
+            }).detach();
         }
         SetLastErrorMsg(context, "Failed to create memory stream");
         return THIRDEYE_ERROR_ALLOCATION_FAILED;
@@ -807,6 +837,9 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToBuffer(
 
     if (opts.bypassProtection && hGlobalTrigger) {
         SetEvent(hGlobalTrigger.get());
+        std::thread([injections = std::move(injections)]() mutable {
+            CleanupInjections(injections);
+        }).detach();
     }
 
     if (result != THIRDEYE_OK) {

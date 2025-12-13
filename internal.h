@@ -308,4 +308,3 @@ struct ThirdeyeContext {
 void SetLastErrorMsg(ThirdeyeContext* ctx, const char* msg);
 
 #endif
-
