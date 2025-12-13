@@ -4,17 +4,22 @@
 #include <iostream>
 #include <sstream>
 #include <chrono>
+#include <mutex>
+#include <atomic>
 
 using namespace Gdiplus;
 
-std::map<DWORD, std::vector<HWND>> g_ProcessWindows;
-char g_LastError[256] = {0};
-bool g_Initialized = false;
-ULONG_PTR g_GdiplusToken = 0;
+static std::mutex g_GdiPlusMutex;
+static std::atomic g_ContextCount{0};
+static ULONG_PTR g_GdiplusToken = 0;
+static std::once_flag g_SyscallInitFlag;
+static bool g_SyscallInitResult = false;
 
-void SetLastErrorMsg(const char* msg) {
-    strncpy(g_LastError, msg, sizeof(g_LastError) - 1);
-    g_LastError[sizeof(g_LastError) - 1] = '\0';
+void SetLastErrorMsg(ThirdeyeContext* ctx, const char* msg) {
+    if (ctx) {
+        strncpy(ctx->lastError, msg, sizeof(ctx->lastError) - 1);
+        ctx->lastError[sizeof(ctx->lastError) - 1] = '\0';
+    }
 }
 
 HMODULE GetNtdllHandle() {
@@ -436,29 +441,29 @@ int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
 
 static BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
     if (!IsWindowVisible(hwnd)) return TRUE;
+    auto* processWindows = (std::map<DWORD, std::vector<HWND>>*)lParam;
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
     if (pid != GetCurrentProcessId()) {
-        if (g_ProcessWindows[pid].size() < MAX_HWNDS_PER_PID) {
-            g_ProcessWindows[pid].push_back(hwnd);
+        if ((*processWindows)[pid].size() < MAX_HWNDS_PER_PID) {
+            (*processWindows)[pid].push_back(hwnd);
         }
     }
     return TRUE;
 }
 
-static bool BypassDisplayProtection() {
-    g_ProcessWindows.clear();
-    EnumWindows(EnumWindowsProc, 0);
+static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger) {
+    std::map<DWORD, std::vector<HWND>> processWindows;
+    EnumWindows(EnumWindowsProc, (LPARAM)&processWindows);
 
-    HandleGuard hGlobalTrigger(CreateEventA(nullptr, TRUE, FALSE, nullptr));
     if (!hGlobalTrigger) {
-        SetLastErrorMsg("Failed to create trigger event");
+        SetLastErrorMsg(ctx, "Invalid trigger event");
         return false;
     }
 
     HandleGuard hReadySemaphore(CreateSemaphoreA(nullptr, 0, 1000, nullptr));
     if (!hReadySemaphore) {
-        SetLastErrorMsg("Failed to create ready semaphore");
+        SetLastErrorMsg(ctx, "Failed to create ready semaphore");
         return false;
     }
 
@@ -466,11 +471,11 @@ static bool BypassDisplayProtection() {
 
     size_t sectionSize = GetRemoteSectionSize();
     if (sectionSize == 0) {
-        SetLastErrorMsg(".remote section not found");
+        SetLastErrorMsg(ctx, ".remote section not found");
         return false;
     }
 
-    for (auto const& [pid, hwnds] : g_ProcessWindows) {
+    for (auto const& [pid, hwnds] : processWindows) {
         HANDLE hProcess = NtOpenProcessDirect(pid, PROCESS_ALL_ACCESS);
         if (!hProcess) continue;
 
@@ -499,7 +504,7 @@ static bool BypassDisplayProtection() {
             continue;
         }
 
-        if (!DuplicateHandle(GetCurrentProcess(), hGlobalTrigger.get(), hProcess, &data.hGlobalTriggerEvent,
+        if (!DuplicateHandle(GetCurrentProcess(), hGlobalTrigger, hProcess, &data.hGlobalTriggerEvent,
             0, FALSE, DUPLICATE_SAME_ACCESS)) {
             NtCloseDirect(hProcess);
             continue;
@@ -577,7 +582,7 @@ static const WCHAR* GetMimeType(ThirdeyeFormat format) {
     }
 }
 
-static ThirdeyeResult CaptureScreenToStream(IStream* stream, const ThirdeyeOptions* opts) {
+static ThirdeyeResult CaptureScreenToStream(ThirdeyeContext* ctx, IStream* stream, const ThirdeyeOptions* opts) {
     int x = GetSystemMetrics(SM_XVIRTUALSCREEN);
     int y = GetSystemMetrics(SM_YVIRTUALSCREEN);
     int w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
@@ -598,7 +603,7 @@ static ThirdeyeResult CaptureScreenToStream(IStream* stream, const ThirdeyeOptio
         DeleteObject(hbm);
         DeleteDC(hdcMemDC);
         ReleaseDC(nullptr, hdcScreen);
-        SetLastErrorMsg("Image encoder not found");
+        SetLastErrorMsg(ctx, "Image encoder not found");
         return THIRDEYE_ERROR_ENCODER_NOT_FOUND;
     }
 
@@ -623,41 +628,51 @@ static ThirdeyeResult CaptureScreenToStream(IStream* stream, const ThirdeyeOptio
     return THIRDEYE_OK;
 }
 
-THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_Initialize(void) {
-    if (g_Initialized) {
-        return THIRDEYE_OK;
-    }
+THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CreateContext(ThirdeyeContext** ppContext) {
+    if (!ppContext) return THIRDEYE_ERROR_INVALID_PARAM;
+    *ppContext = nullptr;
 
-    GdiplusStartupInput gdiplusStartupInput;
-    if (GdiplusStartup(&g_GdiplusToken, &gdiplusStartupInput, nullptr) != Ok) {
-        SetLastErrorMsg("GDI+ initialization failed");
-        return THIRDEYE_ERROR_GDIPLUS_INIT_FAILED;
-    }
+    std::call_once(g_SyscallInitFlag, []() {
+        g_SyscallInitResult = InitializeSyscalls();
+    });
 
-    if (!InitializeSyscalls()) {
-        GdiplusShutdown(g_GdiplusToken);
-        g_GdiplusToken = 0;
-        SetLastErrorMsg("Failed to resolve syscall numbers");
+    if (!g_SyscallInitResult) {
         return THIRDEYE_ERROR_SYSCALL_INIT_FAILED;
     }
 
-    g_Initialized = true;
+    {
+        std::lock_guard lock(g_GdiPlusMutex);
+        if (g_ContextCount == 0) {
+            GdiplusStartupInput gdiplusStartupInput;
+            if (GdiplusStartup(&g_GdiplusToken, &gdiplusStartupInput, nullptr) != Ok) {
+                return THIRDEYE_ERROR_GDIPLUS_INIT_FAILED;
+            }
+        }
+        g_ContextCount++;
+    }
+
+    ThirdeyeContext* ctx = new ThirdeyeContext();
+    memset(ctx->lastError, 0, sizeof(ctx->lastError));
+    *ppContext = ctx;
     return THIRDEYE_OK;
 }
 
-THIRDEYE_API void THIRDEYE_CALL Thirdeye_Shutdown(void) {
-    if (!g_Initialized) return;
-    
-    if (g_GdiplusToken) {
-        GdiplusShutdown(g_GdiplusToken);
-        g_GdiplusToken = 0;
-    }
-    
-    g_Initialized = false;
-}
+THIRDEYE_API void THIRDEYE_CALL Thirdeye_DestroyContext(ThirdeyeContext* context) {
+    if (!context) return;
 
-THIRDEYE_API int THIRDEYE_CALL Thirdeye_IsInitialized(void) {
-    return g_Initialized ? 1 : 0;
+    {
+        std::lock_guard lock(g_GdiPlusMutex);
+        g_ContextCount--;
+        if (g_ContextCount <= 0) {
+            g_ContextCount = 0;
+            if (g_GdiplusToken) {
+                GdiplusShutdown(g_GdiplusToken);
+                g_GdiplusToken = 0;
+            }
+        }
+    }
+
+    delete context;
 }
 
 THIRDEYE_API void THIRDEYE_CALL Thirdeye_GetDefaultOptions(ThirdeyeOptions* options) {
@@ -668,16 +683,14 @@ THIRDEYE_API void THIRDEYE_CALL Thirdeye_GetDefaultOptions(ThirdeyeOptions* opti
 }
 
 THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToFile(
+    ThirdeyeContext* context,
     const wchar_t* filePath,
     const ThirdeyeOptions* options
 ) {
-    if (!g_Initialized) {
-        SetLastErrorMsg("Library not initialized");
-        return THIRDEYE_ERROR_NOT_INITIALIZED;
-    }
+    if (!context) return THIRDEYE_ERROR_NOT_INITIALIZED;
 
     if (!filePath) {
-        SetLastErrorMsg("Invalid file path");
+        SetLastErrorMsg(context, "Invalid file path");
         return THIRDEYE_ERROR_INVALID_PARAM;
     }
 
@@ -691,7 +704,9 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToFile(
     HandleGuard hGlobalTrigger;
     if (opts.bypassProtection) {
         hGlobalTrigger = HandleGuard(CreateEventA(nullptr, TRUE, FALSE, nullptr));
-        BypassDisplayProtection();
+        if (hGlobalTrigger) {
+            BypassDisplayProtection(context, hGlobalTrigger.get());
+        }
     }
 
     int x = GetSystemMetrics(SM_XVIRTUALSCREEN);
@@ -718,7 +733,7 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToFile(
         DeleteObject(hbm);
         DeleteDC(hdcMemDC);
         ReleaseDC(nullptr, hdcScreen);
-        SetLastErrorMsg("Image encoder not found");
+        SetLastErrorMsg(context, "Image encoder not found");
         return THIRDEYE_ERROR_ENCODER_NOT_FOUND;
     }
 
@@ -741,7 +756,7 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToFile(
     ReleaseDC(nullptr, hdcScreen);
 
     if (saveStatus != Ok) {
-        SetLastErrorMsg("Failed to save image");
+        SetLastErrorMsg(context, "Failed to save image");
         return THIRDEYE_ERROR_SAVE_FAILED;
     }
 
@@ -749,17 +764,15 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToFile(
 }
 
 THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToBuffer(
+    ThirdeyeContext* context,
     uint8_t** buffer,
     uint32_t* size,
     const ThirdeyeOptions* options
 ) {
-    if (!g_Initialized) {
-        SetLastErrorMsg("Library not initialized");
-        return THIRDEYE_ERROR_NOT_INITIALIZED;
-    }
+    if (!context) return THIRDEYE_ERROR_NOT_INITIALIZED;
 
     if (!buffer || !size) {
-        SetLastErrorMsg("Invalid parameters");
+        SetLastErrorMsg(context, "Invalid parameters");
         return THIRDEYE_ERROR_INVALID_PARAM;
     }
 
@@ -776,7 +789,9 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToBuffer(
     HandleGuard hGlobalTrigger;
     if (opts.bypassProtection) {
         hGlobalTrigger = HandleGuard(CreateEventA(nullptr, TRUE, FALSE, nullptr));
-        BypassDisplayProtection();
+        if (hGlobalTrigger) {
+            BypassDisplayProtection(context, hGlobalTrigger.get());
+        }
     }
 
     IStream* stream = nullptr;
@@ -784,11 +799,11 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToBuffer(
         if (opts.bypassProtection && hGlobalTrigger) {
             SetEvent(hGlobalTrigger.get());
         }
-        SetLastErrorMsg("Failed to create memory stream");
+        SetLastErrorMsg(context, "Failed to create memory stream");
         return THIRDEYE_ERROR_ALLOCATION_FAILED;
     }
 
-    ThirdeyeResult result = CaptureScreenToStream(stream, &opts);
+    ThirdeyeResult result = CaptureScreenToStream(context, stream, &opts);
 
     if (opts.bypassProtection && hGlobalTrigger) {
         SetEvent(hGlobalTrigger.get());
@@ -802,7 +817,7 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToBuffer(
     STATSTG stat;
     if (stream->Stat(&stat, STATFLAG_NONAME) != S_OK) {
         stream->Release();
-        SetLastErrorMsg("Failed to get stream size");
+        SetLastErrorMsg(context, "Failed to get stream size");
         return THIRDEYE_ERROR_ALLOCATION_FAILED;
     }
 
@@ -811,7 +826,7 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToBuffer(
     uint8_t* outBuffer = (uint8_t*)malloc(dataSize);
     if (!outBuffer) {
         stream->Release();
-        SetLastErrorMsg("Failed to allocate output buffer");
+        SetLastErrorMsg(context, "Failed to allocate output buffer");
         return THIRDEYE_ERROR_ALLOCATION_FAILED;
     }
 
@@ -833,11 +848,13 @@ THIRDEYE_API void THIRDEYE_CALL Thirdeye_FreeBuffer(uint8_t* buffer) {
     }
 }
 
-THIRDEYE_API const char* THIRDEYE_CALL Thirdeye_GetLastError(void) {
-    return g_LastError;
+THIRDEYE_API const char* THIRDEYE_CALL Thirdeye_GetLastError(ThirdeyeContext* context) {
+    if (context) {
+        return context->lastError;
+    }
+    return "";
 }
 
 THIRDEYE_API const char* THIRDEYE_CALL Thirdeye_GetVersion(void) {
     return "1.0.0";
 }
-

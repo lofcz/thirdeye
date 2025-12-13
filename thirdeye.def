@@ -1,12 +1,10 @@
 LIBRARY thirdeye
 EXPORTS
-    Thirdeye_Initialize         @1
-    Thirdeye_Shutdown           @2
-    Thirdeye_IsInitialized      @3
-    Thirdeye_GetDefaultOptions  @4
-    Thirdeye_CaptureToFile      @5
-    Thirdeye_CaptureToBuffer    @6
-    Thirdeye_FreeBuffer         @7
-    Thirdeye_GetLastError       @8
-    Thirdeye_GetVersion         @9
-
+    Thirdeye_CreateContext      @1
+    Thirdeye_DestroyContext     @2
+    Thirdeye_GetDefaultOptions  @3
+    Thirdeye_CaptureToFile      @4
+    Thirdeye_CaptureToBuffer    @5
+    Thirdeye_FreeBuffer         @6
+    Thirdeye_GetLastError       @7
+    Thirdeye_GetVersion         @8

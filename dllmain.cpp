@@ -10,9 +10,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         case DLL_THREAD_DETACH:
             break;
         case DLL_PROCESS_DETACH:
-            if (Thirdeye_IsInitialized()) {
-                Thirdeye_Shutdown();
-            }
             break;
     }
     return TRUE;

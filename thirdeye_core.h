@@ -41,20 +41,22 @@ typedef struct ThirdeyeOptions {
     int bypassProtection;
 } ThirdeyeOptions;
 
-THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_Initialize(void);
+typedef struct ThirdeyeContext ThirdeyeContext;
 
-THIRDEYE_API void THIRDEYE_CALL Thirdeye_Shutdown(void);
+THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CreateContext(ThirdeyeContext** ppContext);
 
-THIRDEYE_API int THIRDEYE_CALL Thirdeye_IsInitialized(void);
+THIRDEYE_API void THIRDEYE_CALL Thirdeye_DestroyContext(ThirdeyeContext* context);
 
 THIRDEYE_API void THIRDEYE_CALL Thirdeye_GetDefaultOptions(ThirdeyeOptions* options);
 
 THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToFile(
+    ThirdeyeContext* context,
     const wchar_t* filePath,
     const ThirdeyeOptions* options
 );
 
 THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToBuffer(
+    ThirdeyeContext* context,
     uint8_t** buffer,
     uint32_t* size,
     const ThirdeyeOptions* options
@@ -62,7 +64,7 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToBuffer(
 
 THIRDEYE_API void THIRDEYE_CALL Thirdeye_FreeBuffer(uint8_t* buffer);
 
-THIRDEYE_API const char* THIRDEYE_CALL Thirdeye_GetLastError(void);
+THIRDEYE_API const char* THIRDEYE_CALL Thirdeye_GetLastError(ThirdeyeContext* context);
 
 THIRDEYE_API const char* THIRDEYE_CALL Thirdeye_GetVersion(void);
 

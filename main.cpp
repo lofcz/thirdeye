@@ -14,7 +14,7 @@ static std::wstring GenerateFilename() {
     return std::wstring(fileNameStr.begin(), fileNameStr.end());
 }
 
-static void Capture() {
+static void Capture(ThirdeyeContext* ctx) {
     std::cout << "[*] Capturing..." << std::endl;
 
     std::wstring filename = GenerateFilename();
@@ -25,21 +25,22 @@ static void Capture() {
     opts.quality = 90;
     opts.bypassProtection = 1;
 
-    ThirdeyeResult result = Thirdeye_CaptureToFile(filename.c_str(), &opts);
+    ThirdeyeResult result = Thirdeye_CaptureToFile(ctx, filename.c_str(), &opts);
 
     if (result == THIRDEYE_OK) {
         std::wcout << L"[+] Saved: " << filename << std::endl;
     } else {
-        std::cerr << "[!] Capture failed: " << Thirdeye_GetLastError() << std::endl;
+        std::cerr << "[!] Capture failed: " << Thirdeye_GetLastError(ctx) << std::endl;
     }
 }
 
 [[noreturn]] int main() {
     std::cout << "[*] ThirdEye v" << Thirdeye_GetVersion() << std::endl;
 
-    ThirdeyeResult initResult = Thirdeye_Initialize();
+    ThirdeyeContext* ctx = nullptr;
+    ThirdeyeResult initResult = Thirdeye_CreateContext(&ctx);
     if (initResult != THIRDEYE_OK) {
-        std::cerr << "[!] Initialization failed: " << Thirdeye_GetLastError() << std::endl;
+        std::cerr << "[!] Initialization failed with error code: " << initResult << std::endl;
         exit(1);
     }
 
@@ -48,7 +49,7 @@ static void Capture() {
 
     while (true) {
         if (GetAsyncKeyState(0x53) & 0x8000) {  // 'S' key
-            Capture();
+            Capture(ctx);
             Sleep(1000);
         }
         Sleep(50);

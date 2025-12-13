@@ -301,12 +301,11 @@ public:
 
 extern "C" SEC_REMOTE FUNC_ATTRS DWORD __stdcall RemoteThreadProc(LPVOID lpParameter);
 
-extern std::map<DWORD, std::vector<HWND>> g_ProcessWindows;
-extern char g_LastError[256];
-extern bool g_Initialized;
-extern ULONG_PTR g_GdiplusToken;
+struct ThirdeyeContext {
+    char lastError[256];
+};
 
-void SetLastErrorMsg(const char* msg);
+void SetLastErrorMsg(ThirdeyeContext* ctx, const char* msg);
 
 #endif
 

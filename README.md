@@ -9,7 +9,6 @@ Starring:
 - Halo's Gate
 - Custom PE sections
 - Undocumented Windows functions
-- Somewhat memetic synchronization model
 - Quick and dirty EDR/AV evasion ([2/72 on VirusTotal](https://www.virustotal.com/gui/file/db1de8681fd4b86870bf6b1af50703a17f7997791387bb5d56b3d5130fe3f789?nocache=1))
 - Direct syscalls
 
@@ -21,24 +20,45 @@ Install the package:
 dotnet add thirdeye
 ```
 
+### Usage (C#)
+
 Take screenshots unmasking any hidden windows:
 
 ```cs
-ThirdEye.CaptureToFile("screenshot.png");
+using ThirdEye;
+
+using var session = new ThirdEyeSession()
+session.CaptureToFile("screenshot.png");
 ```
 
 Options are available:
 
 ```cs
-ThirdEye.CaptureToFile("screenshot.jpeg", new ThirdEyeOptions(
-  format: ThirdeyeFormat.Jpeg,
-  quality: 90,
-  bypassProtection: true
-));
+using var session = new ThirdEyeSession();
+var options = new ThirdEyeOptions(
+    format: ThirdeyeFormat.Jpeg,
+    quality: 90,
+    bypassProtection: true
+);
+    
+session.CaptureToFile("screenshot.jpeg", options);
 ```
 
 If needed, screenshots can be stored in memory:
 
 ```cs
-byte[] bufferData = ThirdEye.CaptureToBuffer();
+using var session = new ThirdEyeSession()
+byte[] bufferData = session.CaptureToBuffer();
+```
+
+### Usage (C/C++)
+
+```cpp
+#include "thirdeye_core.h"
+
+ThirdeyeContext* ctx = nullptr;
+if (Thirdeye_CreateContext(&ctx) == THIRDEYE_OK) {
+    Thirdeye_CaptureToFile(ctx, L"screenshot.jpg", nullptr);
+    Thirdeye_DestroyContext(ctx);
+}
 ```

@@ -7,86 +7,79 @@ namespace ThirdEye;
 /// <summary>
 /// Main entry point for ThirdEye screen capture functionality.
 /// Provides methods to capture screenshots with optional bypass of display protection.
+/// This class is thread-safe.
 /// </summary>
-public static class ThirdEye
+public class ThirdEyeSession : IDisposable
 {
     private const string DllName = "thirdeye_native.dll";
-    private static readonly object InitLock = new();
-    private static int _managedInitialized; // 0 = no, 1 = yes
-    private static int _processExitHooked;  // 0 = no, 1 = yes
+    private IntPtr _context;
+    private bool _disposed;
 
-    private static void EnsureInitialized()
+    /// <summary>
+    /// Initialize a new ThirdEye session.
+    /// </summary>
+    /// <exception cref="ThirdEyeException">Thrown if initialization fails.</exception>
+    public ThirdEyeSession()
     {
-        if (Volatile.Read(ref _managedInitialized) == 1)
+        var result = Native_CreateContext(out _context);
+        if (result != ThirdeyeResult.Ok)
         {
-            return;
+            throw new ThirdEyeException(result, "Failed to create context");
         }
+    }
 
-        lock (InitLock)
+    ~ThirdEyeSession()
+    {
+        Dispose(false);
+    }
+
+    public void Dispose()
+    {
+        Dispose(true);
+        GC.SuppressFinalize(this);
+    }
+
+    protected virtual void Dispose(bool disposing)
+    {
+        if (!_disposed)
         {
-            if (_managedInitialized == 1)
+            if (_context != IntPtr.Zero)
             {
-                return;
+                Native_DestroyContext(_context);
+                _context = IntPtr.Zero;
             }
-
-            var result = Native_Initialize();
-            if (result != ThirdeyeResult.Ok)
-            {
-                throw new ThirdEyeException(result, GetLastError());
-            }
-
-            _managedInitialized = 1;
-
-            // Best-effort cleanup so users don't have to remember calling Shutdown().
-            if (Interlocked.Exchange(ref _processExitHooked, 1) == 0)
-            {
-                AppDomain.CurrentDomain.ProcessExit += (_, _) =>
-                {
-                    try
-                    {
-                        if (Volatile.Read(ref _managedInitialized) == 1)
-                        {
-                            Native_Shutdown();
-                            Volatile.Write(ref _managedInitialized, 0);
-                        }
-                    }
-                    catch
-                    {
-                        // Ignore shutdown failures on process exit.
-                    }
-                };
-            }
+            _disposed = true;
         }
     }
 
     #region Native Imports
 
-    [DllImport(DllName, CallingConvention = CallingConvention.StdCall, EntryPoint = "Thirdeye_Initialize")]
-    private static extern ThirdeyeResult Native_Initialize();
+    [DllImport(DllName, CallingConvention = CallingConvention.StdCall, EntryPoint = "Thirdeye_CreateContext")]
+    private static extern ThirdeyeResult Native_CreateContext(out IntPtr ppContext);
 
-    [DllImport(DllName, CallingConvention = CallingConvention.StdCall, EntryPoint = "Thirdeye_Shutdown")]
-    private static extern void Native_Shutdown();
-
-    [DllImport(DllName, CallingConvention = CallingConvention.StdCall, EntryPoint = "Thirdeye_IsInitialized")]
-    private static extern int Native_IsInitialized();
+    [DllImport(DllName, CallingConvention = CallingConvention.StdCall, EntryPoint = "Thirdeye_DestroyContext")]
+    private static extern void Native_DestroyContext(IntPtr context);
 
     [DllImport(DllName, CallingConvention = CallingConvention.StdCall, EntryPoint = "Thirdeye_GetDefaultOptions")]
     private static extern void Native_GetDefaultOptions(ref ThirdEyeOptions options);
 
     [DllImport(DllName, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode, EntryPoint = "Thirdeye_CaptureToFile")]
     private static extern ThirdeyeResult Native_CaptureToFile(
+        IntPtr context,
         [MarshalAs(UnmanagedType.LPWStr)] string filePath,
         ref ThirdEyeOptions options
     );
 
     [DllImport(DllName, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode, EntryPoint = "Thirdeye_CaptureToFile")]
     private static extern ThirdeyeResult Native_CaptureToFileDefault(
+        IntPtr context,
         [MarshalAs(UnmanagedType.LPWStr)] string filePath,
         IntPtr options
     );
 
     [DllImport(DllName, CallingConvention = CallingConvention.StdCall, EntryPoint = "Thirdeye_CaptureToBuffer")]
     private static extern ThirdeyeResult Native_CaptureToBuffer(
+        IntPtr context,
         out IntPtr buffer,
         out uint size,
         ref ThirdEyeOptions options
@@ -94,6 +87,7 @@ public static class ThirdEye
 
     [DllImport(DllName, CallingConvention = CallingConvention.StdCall, EntryPoint = "Thirdeye_CaptureToBuffer")]
     private static extern ThirdeyeResult Native_CaptureToBufferDefault(
+        IntPtr context,
         out IntPtr buffer,
         out uint size,
         IntPtr options
@@ -103,7 +97,7 @@ public static class ThirdEye
     private static extern void Native_FreeBuffer(IntPtr buffer);
 
     [DllImport(DllName, CallingConvention = CallingConvention.StdCall, EntryPoint = "Thirdeye_GetLastError")]
-    private static extern IntPtr Native_GetLastError();
+    private static extern IntPtr Native_GetLastError(IntPtr context);
 
     [DllImport(DllName, CallingConvention = CallingConvention.StdCall, EntryPoint = "Thirdeye_GetVersion")]
     private static extern IntPtr Native_GetVersion();
@@ -111,58 +105,6 @@ public static class ThirdEye
     #endregion
 
     #region Public API
-
-    /// <summary>
-    /// Gets whether the library has been initialized.
-    /// </summary>
-    public static bool IsInitialized
-    {
-        get
-        {
-            if (Volatile.Read(ref _managedInitialized) == 1)
-            {
-                return true;
-            }
-
-            try
-            {
-                return Native_IsInitialized() != 0;
-            }
-            catch (DllNotFoundException)
-            {
-                return false;
-            }
-            catch (EntryPointNotFoundException)
-            {
-                return false;
-            }
-        }
-    }
-
-    /// <summary>
-    /// Initialize the ThirdEye library.
-    /// capture operations auto-initialize on first use.
-    /// </summary>
-    /// <exception cref="ThirdEyeException">Thrown if initialization fails.</exception>
-    public static void Initialize()
-    {
-        EnsureInitialized();
-    }
-
-    /// <summary>
-    /// Shutdown the ThirdEye library and release all resources.
-    /// </summary>
-    public static void Shutdown()
-    {
-        lock (InitLock)
-        {
-            if (_managedInitialized == 1)
-            {
-                Native_Shutdown();
-                _managedInitialized = 0;
-            }
-        }
-    }
 
     /// <summary>
     /// Get the default capture options.
@@ -180,10 +122,11 @@ public static class ThirdEye
     /// </summary>
     /// <param name="filePath">Path to save the screenshot.</param>
     /// <exception cref="ThirdEyeException">Thrown if capture fails.</exception>
-    public static void CaptureToFile(string filePath)
+    public void CaptureToFile(string filePath)
     {
-        EnsureInitialized();
-        var result = Native_CaptureToFileDefault(filePath, IntPtr.Zero);
+        if (_disposed) throw new ObjectDisposedException(nameof(ThirdEyeSession));
+
+        var result = Native_CaptureToFileDefault(_context, filePath, IntPtr.Zero);
         if (result != ThirdeyeResult.Ok)
         {
             throw new ThirdEyeException(result, GetLastError());
@@ -196,10 +139,11 @@ public static class ThirdEye
     /// <param name="filePath">Path to save the screenshot.</param>
     /// <param name="options">Capture options.</param>
     /// <exception cref="ThirdEyeException">Thrown if capture fails.</exception>
-    public static void CaptureToFile(string filePath, ThirdEyeOptions options)
+    public void CaptureToFile(string filePath, ThirdEyeOptions options)
     {
-        EnsureInitialized();
-        var result = Native_CaptureToFile(filePath, ref options);
+        if (_disposed) throw new ObjectDisposedException(nameof(ThirdEyeSession));
+
+        var result = Native_CaptureToFile(_context, filePath, ref options);
         if (result != ThirdeyeResult.Ok)
         {
             throw new ThirdEyeException(result, GetLastError());
@@ -211,10 +155,11 @@ public static class ThirdEye
     /// </summary>
     /// <returns>Byte array containing the image data.</returns>
     /// <exception cref="ThirdEyeException">Thrown if capture fails.</exception>
-    public static byte[] CaptureToBuffer()
+    public byte[] CaptureToBuffer()
     {
-        EnsureInitialized();
-        var result = Native_CaptureToBufferDefault(out IntPtr buffer, out uint size, IntPtr.Zero);
+        if (_disposed) throw new ObjectDisposedException(nameof(ThirdEyeSession));
+
+        var result = Native_CaptureToBufferDefault(_context, out IntPtr buffer, out uint size, IntPtr.Zero);
         if (result != ThirdeyeResult.Ok)
         {
             throw new ThirdEyeException(result, GetLastError());
@@ -238,10 +183,11 @@ public static class ThirdEye
     /// <param name="options">Capture options.</param>
     /// <returns>Byte array containing the image data.</returns>
     /// <exception cref="ThirdEyeException">Thrown if capture fails.</exception>
-    public static byte[] CaptureToBuffer(ThirdEyeOptions options)
+    public byte[] CaptureToBuffer(ThirdEyeOptions options)
     {
-        EnsureInitialized();
-        var result = Native_CaptureToBuffer(out IntPtr buffer, out uint size, ref options);
+        if (_disposed) throw new ObjectDisposedException(nameof(ThirdEyeSession));
+
+        var result = Native_CaptureToBuffer(_context, out IntPtr buffer, out uint size, ref options);
         if (result != ThirdeyeResult.Ok)
         {
             throw new ThirdEyeException(result, GetLastError());
@@ -263,9 +209,10 @@ public static class ThirdEye
     /// Get the last error message from the native library.
     /// </summary>
     /// <returns>Error message string, or empty string if no error.</returns>
-    public static string GetLastError()
+    public string GetLastError()
     {
-        var ptr = Native_GetLastError();
+        if (_context == IntPtr.Zero) return string.Empty;
+        var ptr = Native_GetLastError(_context);
         return ptr != IntPtr.Zero ? Marshal.PtrToStringAnsi(ptr) ?? string.Empty : string.Empty;
     }
 
@@ -281,4 +228,3 @@ public static class ThirdEye
 
     #endregion
 }
-
