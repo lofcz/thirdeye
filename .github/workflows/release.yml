@@ -207,18 +207,23 @@ jobs:
           path: nupkgs/*.nupkg
           if-no-files-found: error
 
+      - name: NuGet login (OIDC trusted publishing)
+        if: matrix.target == 'nuget' && inputs.publish == true
+        uses: NuGet/login@v1
+        id: nuget-login
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
       - name: Publish NuGet
         if: matrix.target == 'nuget' && inputs.publish == true
         shell: pwsh
-        env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         run: |
           $pkgs = Get-ChildItem nupkgs\*.nupkg
           if (-not $pkgs) { Write-Error "No nupkg found in nupkgs/"; exit 1 }
           foreach ($pkg in $pkgs) {
             dotnet nuget push $pkg.FullName `
               --source https://api.nuget.org/v3/index.json `
-              --api-key $env:NUGET_API_KEY `
+              --api-key ${{ steps.nuget-login.outputs.NUGET_API_KEY }} `
               --skip-duplicate
           }
 
