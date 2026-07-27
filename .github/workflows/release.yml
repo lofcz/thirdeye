@@ -15,7 +15,7 @@ on:
       publish:
         description: "Publish packages (nuget.org / npmjs.com / pypi.org). Otherwise only artifacts are produced."
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: write
@@ -174,7 +174,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish NuGet
-        if: matrix.target == 'nuget' && github.event.inputs.publish == 'true'
+        if: matrix.target == 'nuget' && github.event.inputs.publish == true
         shell: pwsh
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
@@ -219,7 +219,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish npm (OIDC trusted publishing)
-        if: matrix.target == 'npm' && github.event.inputs.publish == 'true'
+        if: matrix.target == 'npm' && github.event.inputs.publish == true
         working-directory: ts
         run: npm publish --access public
 
@@ -257,7 +257,7 @@ jobs:
   publish-pypi:
     name: Publish to PyPI (OIDC)
     needs: [version, release]
-    if: github.event.inputs.publish == 'true'
+    if: github.event.inputs.publish == true
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -276,7 +276,7 @@ jobs:
   tag-release:
     name: Tag and create GitHub release
     needs: [version, release, publish-pypi]
-    if: github.event.inputs.publish == 'true' && always() && needs.release.result == 'success' && needs.publish-pypi.result == 'success'
+    if: github.event.inputs.publish == true && always() && needs.release.result == 'success' && needs.publish-pypi.result == 'success'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
