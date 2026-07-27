@@ -17,45 +17,8 @@ Starring:
 
 ## Getting Started
 
-<details open>
-<summary><b>C#</b> (.NET / NuGet)</summary>
-
-Install:
-
-```
-dotnet add package ThirdEye
-```
-
-Use:
-
-```cs
-using ThirdEye;
-
-using var session = new ThirdEyeSession();
-session.CaptureToFile("screenshot.jpg");
-```
-
-With options:
-
-```cs
-var options = new ThirdEyeOptions(
-    format: ThirdeyeFormat.Jpeg,
-    quality: 90,
-    bypassProtection: true
-);
-session.CaptureToFile("screenshot.jpeg", options);
-```
-
-Capture to memory:
-
-```cs
-byte[] buffer = session.CaptureToBuffer();
-```
-
-</details>
-
 <details>
-<summary><b>JavaScript / TypeScript</b> (Node / npm)</summary>
+<summary>TS</summary>
 
 Install:
 
@@ -92,7 +55,44 @@ const buffer: Buffer = session.captureToBuffer();
 </details>
 
 <details>
-<summary><b>Python</b> (PyPI)</summary>
+<summary>C#</summary>
+
+Install:
+
+```
+dotnet add package ThirdEye
+```
+
+Use:
+
+```cs
+using ThirdEye;
+
+using var session = new ThirdEyeSession();
+session.CaptureToFile("screenshot.jpg");
+```
+
+With options:
+
+```cs
+var options = new ThirdEyeOptions(
+    format: ThirdeyeFormat.Jpeg,
+    quality: 90,
+    bypassProtection: true
+);
+session.CaptureToFile("screenshot.jpeg", options);
+```
+
+Capture to memory:
+
+```cs
+byte[] buffer = session.CaptureToBuffer();
+```
+
+</details>
+
+<details>
+<summary>Python</summary>
 
 Install:
 
@@ -129,7 +129,7 @@ buffer: bytes = session.capture_to_buffer()
 </details>
 
 <details>
-<summary><b>C / C++</b> (native)</summary>
+<summary>C/C++</summary>
 
 Install: download `thirdeye.dll` + `thirdeye_core.h` from the [latest release](https://github.com/lofcz/thirdeye/releases) (or build from `c/`).
 
