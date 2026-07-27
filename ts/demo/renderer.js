@@ -9,12 +9,24 @@ function setStatus(text, isError) {
   statusEl.classList.toggle('error', Boolean(isError));
 }
 
+let pending = 0;
+let done = 0;
+
+function refreshStatus() {
+  if (pending > 0) {
+    setStatus(`Capturing... (${done} saved, ${pending} queued)`, false);
+  }
+}
+
 captureBtn.addEventListener('click', async () => {
-  captureBtn.disabled = true;
-  setStatus('Capturing...', false);
+  // Each click queues an independent capture; the main process serializes them
+  // and gives each a unique filename, so rapid clicks are never dropped.
+  pending += 1;
+  refreshStatus();
   try {
     const result = await window.thirdeyeDemo.capture();
     if (result.ok) {
+      done += 1;
       setStatus(`Saved: ${result.filePath}`, false);
     } else {
       setStatus(`Capture failed: ${result.error}`, true);
@@ -22,7 +34,8 @@ captureBtn.addEventListener('click', async () => {
   } catch (err) {
     setStatus(`Capture failed: ${err}`, true);
   } finally {
-    captureBtn.disabled = false;
+    pending -= 1;
+    refreshStatus();
   }
 });
 

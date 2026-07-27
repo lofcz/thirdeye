@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-verify:
+    name: Build native DLL and verify (E2E bypass)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python (toolchain patcher)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Setup winlibs GCC 16.1.0 (UCRT, POSIX threads)
+        shell: pwsh
+        run: |
+          $url = "https://github.com/brechtsanders/winlibs_mingw/releases/download/16.1.0posix-14.0.0-ucrt-r3/winlibs-x86_64-posix-seh-gcc-16.1.0-mingw-w64ucrt-14.0.0-r3.zip"
+          $zip = "$env:RUNNER_TEMP\winlibs.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP\winlibs" -Force
+          $bin = "$env:RUNNER_TEMP\winlibs\mingw64\bin"
+          if (-not (Test-Path "$bin\gcc.exe")) { throw "winlibs gcc.exe not found under $bin" }
+          echo $bin >> $env:GITHUB_PATH
+          & "$bin\gcc.exe" --version
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -G Ninja -S c -B c/build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ -DCMAKE_RC_COMPILER=windres \
+            -DTHIRDEYE_BUILD_TESTS=ON
+
+      - name: Build DLL and E2E test binaries
+        shell: bash
+        run: cmake --build c/build --config Release --target thirdeye_dll capture_target e2e_test
+
+      - name: Verify build (DLL loads, E2E bypass capture passes)
+        shell: bash
+        run: |
+          test -f c/build/thirdeye.dll
+          echo "== c/build/thirdeye.dll =="
+          ls -l c/build/thirdeye.dll
+          echo "== running E2E bypass test =="
+          (cd c/build && ./e2e_test.exe)
+
+      - name: Upload native DLL (for VT scan)
+        uses: actions/upload-artifact@v4
+        with:
+          name: thirdeye-dll-ci
+          path: c/build/thirdeye.dll
+          if-no-files-found: error
+          retention-days: 1
+
+  virustotal:
+    name: VirusTotal scan (must be 0 detections)
+    needs: [build-verify]
+    runs-on: windows-latest
+    steps:
+      - name: Download native DLL
+        uses: actions/download-artifact@v4
+        with:
+          name: thirdeye-dll-ci
+          path: staging
+
+      - name: Upload to VirusTotal and require 0 detections
+        shell: pwsh
+        env:
+          VT_API_KEY: ${{ secrets.VT_API_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dll = "staging/thirdeye.dll"
+          if (-not (Test-Path $dll)) { throw "DLL not found at $dll" }
+
+          $headers = @{ 'x-apikey' = $env:VT_API_KEY }
+
+          # Compute SHA256 so we can reuse an existing analysis when possible.
+          $sha256 = (Get-FileHash $dll -Algorithm SHA256).Hash.ToLower()
+          Write-Host "SHA256: $sha256"
+
+          $stats = $null
+
+          # 1. Try to reuse an existing file report (saves upload quota).
+          try {
+            $report = Invoke-RestMethod -Uri "https://www.virustotal.com/api/v3/files/$sha256" -Headers $headers -Method Get
+            $stats = $report.data.attributes.last_analysis_stats
+            Write-Host "Reused existing VirusTotal report."
+          } catch {
+            Write-Host "No existing report; uploading file for analysis."
+          }
+
+          # 2. Upload if no report exists, then poll until the analysis completes.
+          if ($null -eq $stats) {
+            $fileItem = Get-Item $dll
+            $upload = Invoke-RestMethod -Uri "https://www.virustotal.com/api/v3/files" -Headers $headers -Method Post -Form @{ file = $fileItem }
+            $analysisId = $upload.data.id
+            Write-Host "Uploaded. analysis id: $analysisId"
+
+            $deadline = (Get-Date).AddMinutes(15)
+            do {
+              Start-Sleep -Seconds 15
+              $analysis = Invoke-RestMethod -Uri "https://www.virustotal.com/api/v3/analyses/$analysisId" -Headers $headers -Method Get
+              $status = $analysis.data.attributes.status
+              Write-Host "analysis status: $status"
+              if ($status -eq 'completed') { $stats = $analysis.data.attributes.stats; break }
+            } while ((Get-Date) -lt $deadline)
+          }
+
+          if ($null -eq $stats) { throw "VirusTotal analysis did not complete in time." }
+
+          $malicious  = [int]$stats.malicious
+          $suspicious = [int]$stats.suspicious
+          $undetected = [int]$stats.undetected
+          $harmless   = [int]$stats.harmless
+          $total = $malicious + $suspicious + $undetected + $harmless
+          $detections = $malicious + $suspicious
+
+          Write-Host "VirusTotal result: $detections/$total detections (malicious=$malicious suspicious=$suspicious harmless=$harmless undetected=$undetected)"
+
+          if ($detections -ne 0) {
+            Write-Error "VirusTotal flagged the DLL: $detections engine(s) detected it (malicious=$malicious, suspicious=$suspicious). Failing the build."
+            exit 1
+          }
+          Write-Host "VirusTotal clean: 0/$total"

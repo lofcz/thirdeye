@@ -27,6 +27,7 @@ typedef enum ThirdeyeResult {
     THIRDEYE_ERROR_ALLOCATION_FAILED = -6,
     THIRDEYE_ERROR_INVALID_PARAM = -7,
     THIRDEYE_ERROR_NO_REMOTE_SECTION = -8,
+    THIRDEYE_ERROR_CAPTURE_FAILED = -9,
 } ThirdeyeResult;
 
 typedef enum ThirdeyeFormat {

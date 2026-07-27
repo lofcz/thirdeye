@@ -51,7 +51,22 @@ struct SBoxTables {
     }
 };
 
+#ifndef _MSC_VER
+// GCC/Clang: a single namespace-scope constant usable in constant expressions.
 constexpr SBoxTables kTables{};
+// Under MSVC a namespace-scope constexpr variable is not reliably usable in an
+// enclosing constant expression (C2131). Constructing the table as a
+// function-local constexpr object works there, so use a uniform accessor that
+// reads through a local on MSVC and the global elsewhere.
+#define AES_TABLES() (kTables)
+#else
+// MSVC path: a function-local constexpr table evaluated at compile time.
+constexpr const SBoxTables& LocalTables() {
+    constexpr SBoxTables t{};
+    return t;
+}
+#define AES_TABLES() (shred_detail::aes::LocalTables())
+#endif
 
 constexpr uint8_t MakeRcon(int i) {
     const char* seed = "thirdeye.rcon.v1";
@@ -74,8 +89,8 @@ constexpr void KeyExpansion(const uint8_t* key, uint8_t* w) {
         uint8_t temp[4] = { w[4 * (i - 1)], w[4 * (i - 1) + 1], w[4 * (i - 1) + 2], w[4 * (i - 1) + 3] };
         if (i % 4 == 0) {
             uint8_t t = temp[0];
-            temp[0] = kTables.fwd[temp[1]] ^ rcon[i / 4]; temp[1] = kTables.fwd[temp[2]];
-            temp[2] = kTables.fwd[temp[3]]; temp[3] = kTables.fwd[t];
+            temp[0] = AES_TABLES().fwd[temp[1]] ^ rcon[i / 4]; temp[1] = AES_TABLES().fwd[temp[2]];
+            temp[2] = AES_TABLES().fwd[temp[3]]; temp[3] = AES_TABLES().fwd[t];
         }
         w[4 * i] = w[4 * (i - 4)] ^ temp[0]; w[4 * i + 1] = w[4 * (i - 4) + 1] ^ temp[1];
         w[4 * i + 2] = w[4 * (i - 4) + 2] ^ temp[2]; w[4 * i + 3] = w[4 * (i - 4) + 3] ^ temp[3];
@@ -85,8 +100,8 @@ constexpr void KeyExpansion(const uint8_t* key, uint8_t* w) {
 constexpr void AddRoundKey(uint8_t* state, const uint8_t* roundKey) {
     for (int i = 0; i < 16; i++) state[i] ^= roundKey[i];
 }
-constexpr void SubBytes(uint8_t* state) { for (int i = 0; i < 16; i++) state[i] = kTables.fwd[state[i]]; }
-constexpr void InvSubBytes(uint8_t* state) { for (int i = 0; i < 16; i++) state[i] = kTables.inv[state[i]]; }
+constexpr void SubBytes(uint8_t* state) { for (int i = 0; i < 16; i++) state[i] = AES_TABLES().fwd[state[i]]; }
+constexpr void InvSubBytes(uint8_t* state) { for (int i = 0; i < 16; i++) state[i] = AES_TABLES().inv[state[i]]; }
 
 constexpr void ShiftRows(uint8_t* state) {
     uint8_t t[16] = {};
@@ -226,16 +241,45 @@ struct Shredded {
     }
 };
 
+// Scoped plaintext holder: owns a stack buffer sized to the shredded payload,
+// decrypts into it on construction, and zeroes it on destruction. This replaces
+// both the old thread_local buffer (which pulls libwinpthread via GCC's
+// emulated TLS -- the injection-signature import set we're concealing) and a
+// shared static buffer (non-reentrant, leaves plaintext resident). The object
+// is bound to a scoped const reference at each call site, so its lifetime spans
+// the full enclosing expression while the storage stays on the caller's frame.
+template <size_t N>
+struct Revealed {
+    char buf[N];
+    template <size_t M, uint64_t A, uint64_t B, uint64_t C>
+    explicit Revealed(const Shredded<M, A, B, C>& s) : buf{} {
+        static_assert(M <= N, "Revealed buffer too small");
+        s.reveal(buf);
+    }
+    Revealed(const Revealed&) = delete;
+    Revealed& operator=(const Revealed&) = delete;
+    ~Revealed() {
+        volatile char* p = buf;
+        for (size_t i = 0; i < N; ++i) p[i] = 0;
+    }
+    const char* c_str() const { return buf; }
+    operator const char*() const { return buf; }
+};
+
 }
 
 #define SHRED(str) shred_detail::Shredded<sizeof(str), \
     shred_detail::NameHash(), (uint64_t)__COUNTER__, (uint64_t)__LINE__>(str)
 
-#define REVEAL_CSTR(shredded) ([&]() -> const char* { \
-    static thread_local char _buf[sizeof((shredded).data) + 1]; \
-    (shredded).reveal(_buf); \
-    return _buf; \
-}())
+// Reveal into a scoped, self-zeroing stack buffer with no TLS and no shared
+// state. Expands to a declaration of a `Revealed` object plus yields its
+// C-string pointer via a comma expression, so it can be used inline anywhere a
+// `const char*` is expected:
+//     Fn(REVEAL_CSTR(obfName));
+// The `Revealed` temporary lives until the end of the full expression, and its
+// destructor wipes the plaintext. Storage is on the caller's frame.
+#define REVEAL_CSTR(shredded) \
+    shred_detail::Revealed<sizeof((shredded).data) + 1>(shredded).c_str()
 
 #define REVEAL_STR(shredded) std::string(REVEAL_CSTR(shredded))
 

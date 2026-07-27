@@ -90,16 +90,34 @@ async function main() {
   // wait for the invisible window to be fully up before capturing
   await new Promise((r) => setTimeout(r, 2500));
 
-  const result = await send('Runtime.evaluate', {
-    expression: `document.getElementById('capture').click(); 'clicked'`,
+  // Rapid-fire 5 clicks to verify the queue produces 5 distinct files.
+  const CLICKS = 5;
+  await send('Runtime.evaluate', {
+    expression: `for (let i = 0; i < ${CLICKS}; i++) document.getElementById('capture').click(); 'clicked ${CLICKS}x'`,
     awaitPromise: false,
   });
-  console.log('click:', JSON.stringify(result.result));
+  console.log(`clicked ${CLICKS} times rapidly`);
 
-  const capturePath = await waitForNewCapture(before, 20000);
-  console.log('CAPTURED:', capturePath);
-  const stat = fs.statSync(capturePath);
-  console.log('size:', stat.size, 'bytes');
+  // Wait for all expected new captures to appear.
+  const deadline2 = Date.now() + 60000;
+  let fresh = [];
+  while (Date.now() < deadline2) {
+    const now = fs.readdirSync(DEMO_DIR).filter((f) => f.startsWith(CAPTURE_PREFIX) && f.endsWith('.jpg'));
+    fresh = now.filter((f) => !before.has(f));
+    if (fresh.length >= CLICKS) break;
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  console.log(`produced ${fresh.length}/${CLICKS} captures:`);
+  fresh.sort().forEach((f) => console.log('  ', f, fs.statSync(path.join(DEMO_DIR, f)).size, 'bytes'));
+
+  if (fresh.length !== CLICKS) {
+    throw new Error(`expected ${CLICKS} captures, got ${fresh.length}`);
+  }
+  const uniqueNames = new Set(fresh);
+  if (uniqueNames.size !== CLICKS) {
+    throw new Error(`filenames not unique: ${uniqueNames.size}/${CLICKS}`);
+  }
+  console.log('OK: all rapid captures produced unique files');
 
   ws.close();
   try { process.kill(demo.pid); } catch {}

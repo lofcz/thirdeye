@@ -59,13 +59,20 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
-  ipcMain.handle('capture', () => {
+  // Serialize captures through a promise queue. The native session/GDI+ is not
+  // safe to re-enter concurrently, and rapid clicks must each produce their own
+  // file rather than race or overwrite one another.
+  let captureQueue = Promise.resolve();
+  let captureCounter = 0;
+
+  const runCapture = () => {
+    captureCounter += 1;
     const stamp = new Date()
       .toISOString()
       .replace(/[:.]/g, '-')
       .replace('T', '_')
-      .slice(0, 19);
-    const filePath = path.join(app.getAppPath(), `capture_${stamp}.jpg`);
+      .slice(0, 23); // keep milliseconds so filenames never collide within a second
+    const filePath = path.join(app.getAppPath(), `capture_${stamp}_${captureCounter}.jpg`);
 
     try {
       const s = getSession();
@@ -79,6 +86,12 @@ app.whenReady().then(() => {
     } catch (err) {
       return { ok: false, error: String(err && err.message ? err.message : err) };
     }
+  };
+
+  ipcMain.handle('capture', () => {
+    const result = captureQueue.then(runCapture, runCapture);
+    captureQueue = result.catch(() => {});
+    return result;
   });
 
   ipcMain.handle('spawn-invisible', () => {

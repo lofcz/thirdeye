@@ -75,3 +75,27 @@ FARPROC DynGetProcAddress(HMODULE moduleBase, const char* funcName) {
     }
     return nullptr;
 }
+
+typedef NTSTATUS(NTAPI* pLdrLoadDll)(PWSTR, PULONG, UNICODE_STRING*, PHANDLE);
+
+HMODULE DynLoadLibrary(const WCHAR* moduleName) {
+    if (!moduleName) return nullptr;
+    static constexpr auto obfNtdll = MAKE_OBF("ntdll.dll");
+    static constexpr auto obfLdrLoadDll = MAKE_OBF("LdrLoadDll");
+    HMODULE hNtdll = DynGetModuleHandle(DECR_STR(obfNtdll));
+    if (!hNtdll) return nullptr;
+    pLdrLoadDll fn = (pLdrLoadDll)DynGetProcAddress(hNtdll, DECR_STR(obfLdrLoadDll));
+    if (!fn) return nullptr;
+
+    size_t len = 0;
+    while (moduleName[len]) ++len;
+
+    UNICODE_STRING us;
+    us.Length = (USHORT)(len * sizeof(WCHAR));
+    us.MaximumLength = us.Length + sizeof(WCHAR);
+    us.Buffer = (PWSTR)moduleName;
+
+    HANDLE hMod = nullptr;
+    NTSTATUS status = fn(nullptr, nullptr, &us, &hMod);
+    return NT_SUCCESS(status) ? (HMODULE)hMod : nullptr;
+}
