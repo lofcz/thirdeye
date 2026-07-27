@@ -6,11 +6,12 @@ Usermode `WDA_MONITOR`/`WDA_EXCLUDEFROMCAPTURE` bypasser using undocumented Wind
 
 Starring:
 - PEB walking
-- Halo's Gate
+- Tartarus Gate
 - Custom PE sections
-- Undocumented Windows functions
-- Quick and dirty EDR/AV evasion ([2/72 on VirusTotal](https://www.virustotal.com/gui/file/db1de8681fd4b86870bf6b1af50703a17f7997791387bb5d56b3d5130fe3f789?nocache=1))
-- Direct syscalls
+- `Zw*` Windows functions
+- EDR/AV evasion ([0/69 on VirusTotal](https://www.virustotal.com/gui/file/c7df1ab62ee8f5785623630add373f3883ad135b5207e2c66f08731d384531ba))
+- No `0F 05` via `ntdll.dll` indirection
+- `constexpr` AES-like literals shredding, clean `.rodata`
 
 ## Getting Started
 
