@@ -9,3 +9,13 @@ thirdeye.dll.c
 /tests/csharp_e2e/bin
 /tests/csharp_e2e/obj
 /vt_variants
+
+/ts/bin
+/ts/node_modules
+/ts/*.tgz
+
+/python/eye3/thirdeye.dll
+/python/dist
+/python/build
+/python/*.egg-info
+__pycache__

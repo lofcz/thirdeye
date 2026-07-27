@@ -1,0 +1,41 @@
+{
+  "name": "@lofcz/thirdeye",
+  "version": "1.0.0",
+  "description": "Screen capture library bypassing WDA_MONITOR/WDA_EXCLUDEFROMCAPTURE (Windows x64 native binary)",
+  "license": "MIT",
+  "author": "Matěj \"lofcz\" Štágl",
+  "homepage": "https://github.com/lofcz/thirdeye",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lofcz/thirdeye"
+  },
+  "keywords": [
+    "screenshot",
+    "screen-capture",
+    "windows",
+    "display-affinity",
+    "native"
+  ],
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "bin/thirdeye.dll"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "optionalDependencies": {
+    "koffi": "^2.5.0"
+  },
+  "scripts": {
+    "test": "node -e \"const t=require('./index.js');console.log('dll:',t.getLibraryPath())\""
+  }
+}

@@ -1,0 +1,269 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 1.0.0). Applied identically to the zip, NuGet, npm and PyPI packages."
+        required: true
+        type: string
+      publish:
+        description: "Publish packages (nuget.org / npmjs.com / pypi.org). Otherwise only artifacts are produced."
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  DLL_NAME: thirdeye.dll
+  NATIVE_DLL_NAME: thirdeye_native.dll
+
+jobs:
+  version:
+    name: Resolve version
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - name: Validate and normalize version
+        id: resolve
+        shell: pwsh
+        run: |
+          $v = "${{ github.event.inputs.version }}".Trim().TrimStart('v')
+          if ($v -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z\.-]+)?$') {
+            Write-Host "::error::Invalid version '${{ github.event.inputs.version }}'. Expected SemVer like 1.0.0 or 1.0.0-beta.1"
+            exit 1
+          }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag=v$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Releasing version $v (tag v$v)"
+
+  build-native:
+    name: Build native DLL
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python (toolchain patcher)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Setup MinGW-w64 (GCC)
+        uses: egor-tensin/setup-mingw@v2
+        with:
+          platform: x64
+          static: true
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ -DCMAKE_RC_COMPILER=windres \
+            -DTHIRDEYE_BUILD_TESTS=ON
+
+      - name: Build
+        shell: bash
+        run: cmake --build build --config Release --target thirdeye_dll
+
+      - name: Verify DLL exists
+        shell: bash
+        run: test -f build/thirdeye.dll && echo "built build/thirdeye.dll"
+
+      - name: Upload native DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: thirdeye-dll
+          path: build/thirdeye.dll
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: release (${{ matrix.target }})
+    needs: [version, build-native]
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [zip, nuget, npm, pypi]
+
+    env:
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
+      RELEASE_TAG: ${{ needs.version.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download native DLL
+        uses: actions/download-artifact@v4
+        with:
+          name: thirdeye-dll
+          path: staging
+
+      # ---------------- plain zipped DLL (C++) ----------------
+      - name: Package zipped DLL
+        if: matrix.target == 'zip'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item staging/${{ env.DLL_NAME }} dist/${{ env.DLL_NAME }}
+          Copy-Item thirdeye_core.h dist/thirdeye_core.h
+          Compress-Archive -Path dist/* -DestinationPath "dist/thirdeye-native-win-x64-${{ env.RELEASE_VERSION }}.zip" -Force
+
+      - name: Upload zip artifact
+        if: matrix.target == 'zip'
+        uses: actions/upload-artifact@v4
+        with:
+          name: thirdeye-native-win-x64
+          path: dist/thirdeye-native-win-x64-*.zip
+          if-no-files-found: error
+
+      # ---------------- NuGet ----------------
+      - name: Setup .NET
+        if: matrix.target == 'nuget'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Stage native DLL for NuGet
+        if: matrix.target == 'nuget'
+        shell: pwsh
+        run: |
+          $dest = "dotnet/src/ThirdEye/runtimes/win-x64/native"
+          New-Item -ItemType Directory -Force $dest | Out-Null
+          Copy-Item staging/${{ env.DLL_NAME }} "$dest/${{ env.NATIVE_DLL_NAME }}" -Force
+
+      - name: Pack NuGet
+        if: matrix.target == 'nuget'
+        shell: pwsh
+        run: |
+          dotnet pack dotnet/src/ThirdEye/ThirdEye.csproj -c Release -o nupkgs /p:Version=${{ env.RELEASE_VERSION }}
+
+      - name: Upload NuGet artifact
+        if: matrix.target == 'nuget'
+        uses: actions/upload-artifact@v4
+        with:
+          name: thirdeye-nuget
+          path: nupkgs/*.nupkg
+          if-no-files-found: error
+
+      - name: Publish NuGet
+        if: matrix.target == 'nuget' && github.event.inputs.publish == 'true'
+        shell: pwsh
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          dotnet nuget push nupkgs/*.nupkg `
+            --source https://api.nuget.org/v3/index.json `
+            --api-key $env:NUGET_API_KEY `
+            --skip-duplicate
+
+      # ---------------- npm ----------------
+      - name: Setup Node
+        if: matrix.target == 'npm'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.x"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Upgrade npm (trusted publishing requires >= 11.5.1)
+        if: matrix.target == 'npm'
+        run: npm install -g npm@latest
+
+      - name: Stage native DLL for npm
+        if: matrix.target == 'npm'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ts/bin | Out-Null
+          Copy-Item staging/${{ env.DLL_NAME }} ts/bin/${{ env.DLL_NAME }} -Force
+
+      - name: Pack npm
+        if: matrix.target == 'npm'
+        working-directory: ts
+        run: |
+          npm version "${{ env.RELEASE_VERSION }}" --no-git-tag-version
+          npm pack
+
+      - name: Upload npm artifact
+        if: matrix.target == 'npm'
+        uses: actions/upload-artifact@v4
+        with:
+          name: thirdeye-npm
+          path: ts/*.tgz
+          if-no-files-found: error
+
+      - name: Publish npm (OIDC trusted publishing)
+        if: matrix.target == 'npm' && github.event.inputs.publish == 'true'
+        working-directory: ts
+        run: npm publish --access public
+
+      # ---------------- PyPI (OIDC trusted publisher) ----------------
+      - name: Setup Python
+        if: matrix.target == 'pypi'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Stage native DLL for wheel
+        if: matrix.target == 'pypi'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force python/eye3 | Out-Null
+          Copy-Item staging/${{ env.DLL_NAME }} python/eye3/${{ env.DLL_NAME }} -Force
+
+      - name: Build wheel
+        if: matrix.target == 'pypi'
+        working-directory: python
+        shell: bash
+        run: |
+          python -m pip install --upgrade build
+          sed -i "s/^version = \".*\"/version = \"${RELEASE_VERSION}\"/" pyproject.toml
+          python -m build --wheel
+
+      - name: Upload wheel artifact
+        if: matrix.target == 'pypi'
+        uses: actions/upload-artifact@v4
+        with:
+          name: thirdeye-pypi
+          path: python/dist/*.whl
+          if-no-files-found: error
+
+      - name: Publish to PyPI (OIDC)
+        if: matrix.target == 'pypi' && github.event.inputs.publish == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: python/dist
+
+  tag-release:
+    name: Tag and create GitHub release
+    needs: [version, release]
+    if: github.event.inputs.publish == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: thirdeye-*
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Create tag
+        shell: bash
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git tag -a "${{ needs.version.outputs.tag }}" -m "Release ${{ needs.version.outputs.tag }}"
+          git push origin "${{ needs.version.outputs.tag }}"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: ${{ needs.version.outputs.tag }}
+          generate_release_notes: true
+          files: release-artifacts/**
