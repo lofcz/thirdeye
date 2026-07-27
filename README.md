@@ -2,7 +2,7 @@
 
 # Third Eye
 
-Usermode `WDA_MONITOR`/`WDA_EXCLUDEFROMCAPTURE` bypasser using undocumented Windows functions with C# bindings.
+Usermode `WDA_MONITOR`/`WDA_EXCLUDEFROMCAPTURE` bypasser written in C++ with C# bindings.
 
 Starring:
 - PEB walking
