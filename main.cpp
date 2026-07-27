@@ -18,7 +18,7 @@ static void Capture(ThirdeyeContext* ctx) {
     std::cout << "[*] Capturing..." << std::endl;
 
     std::wstring filename = GenerateFilename();
-    
+
     ThirdeyeOptions opts;
     Thirdeye_GetDefaultOptions(&opts);
     opts.format = THIRDEYE_FORMAT_JPEG;
@@ -48,7 +48,7 @@ static void Capture(ThirdeyeContext* ctx) {
     std::cout << std::endl;
 
     while (true) {
-        if (GetAsyncKeyState(0x53) & 0x8000) {  // 'S' key
+        if (GetAsyncKeyState(0x53) & 0x8000) {  
             Capture(ctx);
             Sleep(1000);
         }

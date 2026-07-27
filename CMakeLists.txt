@@ -1,10 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
-project(thirdeye C CXX ASM)
+project(thirdeye C CXX ASM RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 enable_language(ASM)
+enable_language(RC)
 
 set(COMMON_COMPILE_OPTIONS
     -fno-stack-protector
@@ -17,7 +18,8 @@ set(COMMON_LIBS user32 gdi32 gdiplus ole32)
 
 set(CORE_SOURCES
     thirdeye_core.cpp
-    syscalls.S
+    lge_syscalls.cpp
+    dynresolve.cpp
 )
 
 set(CORE_HEADERS
@@ -37,6 +39,7 @@ target_link_libraries(thirdeye_core PUBLIC ${COMMON_LIBS})
 add_library(thirdeye_dll SHARED
     dllmain.cpp
     thirdeye.def
+    version.rc
 )
 
 set_target_properties(thirdeye_dll PROPERTIES
@@ -51,6 +54,7 @@ target_link_options(thirdeye_dll PRIVATE
     -static
     -static-libgcc
     -static-libstdc++
+    -s
 )
 
 add_executable(thirdeye_exe
@@ -67,6 +71,7 @@ target_link_options(thirdeye_exe PRIVATE
     -static
     -static-libgcc
     -static-libstdc++
+    -s
 )
 
 install(TARGETS thirdeye_dll thirdeye_exe
@@ -78,3 +83,23 @@ install(TARGETS thirdeye_dll thirdeye_exe
 install(FILES thirdeye_core.h DESTINATION include)
 
 add_custom_target(all_targets DEPENDS thirdeye_dll thirdeye_exe)
+
+option(THIRDEYE_BUILD_TESTS "Build the thirdeye E2E tests" ON)
+
+if(THIRDEYE_BUILD_TESTS)
+    enable_testing()
+
+    add_executable(capture_target WIN32 tests/capture_target.cpp)
+    target_link_libraries(capture_target PRIVATE user32 gdi32)
+
+    add_executable(e2e_test tests/e2e_test.cpp)
+    target_include_directories(e2e_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(e2e_test PRIVATE thirdeye_core ${COMMON_LIBS})
+
+    add_test(
+        NAME wda_exclude_from_capture
+        COMMAND e2e_test
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    )
+    set_tests_properties(wda_exclude_from_capture PROPERTIES TIMEOUT 60)
+endif()

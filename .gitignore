@@ -3,3 +3,5 @@ cmake-build-debug
 .vs
 .code
 /cmake-build-release
+/build
+lge_test.jpg

