@@ -6,3 +6,6 @@ cmake-build-debug
 /build
 lge_test.jpg
 thirdeye.dll.c
+/tests/csharp_e2e/bin
+/tests/csharp_e2e/obj
+/vt_variants
