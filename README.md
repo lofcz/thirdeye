@@ -1,4 +1,6 @@
 [![ThirdEye](https://shields.io/nuget/v/ThirdEye?v=302&icon=nuget&label=ThirdEye)](https://www.nuget.org/packages/ThirdEye)
+[![npm](https://img.shields.io/npm/v/@lofcz/thirdeye?logo=npm&label=@lofcz/thirdeye)](https://www.npmjs.com/package/@lofcz/thirdeye)
+[![PyPI](https://img.shields.io/pypi/v/eye3?logo=pypi&label=eye3)](https://pypi.org/project/eye3/)
 
 # Third Eye
 
