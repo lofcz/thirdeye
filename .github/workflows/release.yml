@@ -153,11 +153,17 @@ jobs:
           New-Item -ItemType Directory -Force $dest | Out-Null
           Copy-Item staging/${{ env.DLL_NAME }} "$dest/${{ env.NATIVE_DLL_NAME }}" -Force
 
+      - name: Build NuGet
+        if: matrix.target == 'nuget'
+        shell: pwsh
+        run: |
+          dotnet build dotnet/src/ThirdEye/ThirdEye.csproj -c Release /p:Version=${{ env.RELEASE_VERSION }}
+
       - name: Pack NuGet
         if: matrix.target == 'nuget'
         shell: pwsh
         run: |
-          dotnet pack dotnet/src/ThirdEye/ThirdEye.csproj -c Release -o nupkgs /p:Version=${{ env.RELEASE_VERSION }}
+          dotnet pack dotnet/src/ThirdEye/ThirdEye.csproj -c Release --no-build -o nupkgs /p:Version=${{ env.RELEASE_VERSION }}
 
       - name: Upload NuGet artifact
         if: matrix.target == 'nuget'
@@ -248,16 +254,29 @@ jobs:
           path: python/dist/*.whl
           if-no-files-found: error
 
-      - name: Publish to PyPI (OIDC)
-        if: matrix.target == 'pypi' && github.event.inputs.publish == 'true'
+  publish-pypi:
+    name: Publish to PyPI (OIDC)
+    needs: [version, release]
+    if: github.event.inputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - name: Download wheel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: thirdeye-pypi
+          path: dist
+
+      - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          packages-dir: python/dist
+          packages-dir: dist
 
   tag-release:
     name: Tag and create GitHub release
-    needs: [version, release]
-    if: github.event.inputs.publish == 'true'
+    needs: [version, release, publish-pypi]
+    if: github.event.inputs.publish == 'true' && always() && needs.release.result == 'success' && needs.publish-pypi.result == 'success'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

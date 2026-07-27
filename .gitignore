@@ -19,3 +19,5 @@ thirdeye.dll.c
 /python/build
 /python/*.egg-info
 __pycache__
+/dotnet/src/ThirdEye/runtimes
+/nupkgs
