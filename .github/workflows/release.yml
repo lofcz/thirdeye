@@ -103,11 +103,17 @@ jobs:
         with:
           python-version: "3.x"
 
-      - name: Setup MinGW-w64 (GCC)
-        uses: egor-tensin/setup-mingw@v2
-        with:
-          platform: x64
-          static: true
+      - name: Setup winlibs GCC 16.1.0 (UCRT, POSIX threads)
+        shell: pwsh
+        run: |
+          $url = "https://github.com/brechtsanders/winlibs_mingw/releases/download/16.1.0posix-14.0.0-ucrt-r3/winlibs-x86_64-posix-seh-gcc-16.1.0-mingw-w64ucrt-14.0.0-r3.zip"
+          $zip = "$env:RUNNER_TEMP\winlibs.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP\winlibs" -Force
+          $bin = "$env:RUNNER_TEMP\winlibs\mingw64\bin"
+          if (-not (Test-Path "$bin\gcc.exe")) { throw "winlibs gcc.exe not found under $bin" }
+          echo $bin >> $env:GITHUB_PATH
+          & "$bin\gcc.exe" --version
 
       - name: Configure
         shell: bash
@@ -266,7 +272,7 @@ jobs:
         working-directory: ts
         run: npm publish --access public
 
-      # ---------------- PyPI (OIDC trusted publisher) ----------------
+      # ---------------- PyPI ----------------
       - name: Setup Python
         if: matrix.target == 'pypi'
         uses: actions/setup-python@v5
