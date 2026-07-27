@@ -3,10 +3,15 @@ name: Release
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: "Release version (e.g. 1.0.0). Applied identically to the zip, NuGet, npm and PyPI packages."
+      release_type:
+        description: "Version bump to apply on top of the latest v* tag"
         required: true
-        type: string
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
       publish:
         description: "Publish packages (nuget.org / npmjs.com / pypi.org). Otherwise only artifacts are produced."
         type: boolean
@@ -28,18 +33,30 @@ jobs:
       version: ${{ steps.resolve.outputs.version }}
       tag: ${{ steps.resolve.outputs.tag }}
     steps:
-      - name: Validate and normalize version
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Bump version from latest tag
         id: resolve
         shell: pwsh
         run: |
-          $v = "${{ github.event.inputs.version }}".Trim().TrimStart('v')
-          if ($v -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z\.-]+)?$') {
-            Write-Host "::error::Invalid version '${{ github.event.inputs.version }}'. Expected SemVer like 1.0.0 or 1.0.0-beta.1"
-            exit 1
+          $bump = "${{ github.event.inputs.release_type }}"
+          $latest = git tag -l "v*" | ForEach-Object { $_.TrimStart('v') } |
+            Where-Object { $_ -match '^\d+\.\d+\.\d+$' } |
+            Sort-Object { [version]$_ } | Select-Object -Last 1
+          if (-not $latest) { $latest = "1.0.0" }
+          $parts = $latest.Split('.')
+          $major = [int]$parts[0]; $minor = [int]$parts[1]; $patch = [int]$parts[2]
+          switch ($bump) {
+            'major' { $major++; $minor = 0; $patch = 0 }
+            'minor' { $minor++; $patch = 0 }
+            default { $patch++ }
           }
+          $v = "$major.$minor.$patch"
           "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "tag=v$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          Write-Host "Releasing version $v (tag v$v)"
+          Write-Host "Bumped $latest -> $v ($bump), tag v$v"
 
   build-native:
     name: Build native DLL
