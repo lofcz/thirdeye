@@ -4,14 +4,14 @@
 
 # Third Eye
 
-Usermode `WDA_MONITOR`/`WDA_EXCLUDEFROMCAPTURE` bypasser written in C++ with C# bindings.
+Usermode `WDA_MONITOR`/`WDA_EXCLUDEFROMCAPTURE` bypasser written in C++ with bindings for several popular languages.
 
 Starring:
 - PEB walking
 - Tartarus Gate
 - Custom PE sections
 - `Zw*` Windows functions
-- EDR/AV evasion ([0/69 on VirusTotal](https://www.virustotal.com/gui/file/c7df1ab62ee8f5785623630add373f3883ad135b5207e2c66f08731d384531ba))
+- EDR/AV evasion ([0/70 on VirusTotal](https://www.virustotal.com/gui/file/c7df1ab62ee8f5785623630add373f3883ad135b5207e2c66f08731d384531ba))
 - No `0F 05` via `ntdll.dll` indirection
 - `constexpr` AES-like literals shredding, clean `.rodata`
 
