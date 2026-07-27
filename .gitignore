@@ -22,3 +22,4 @@ thirdeye.dll.c
 __pycache__
 /net/src/ThirdEye/runtimes
 /nupkgs
+/ts/demo/node_modules

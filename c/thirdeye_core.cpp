@@ -385,14 +385,19 @@ DWORD __stdcall RemoteThreadProc(LPVOID lpParameter) {
 #pragma check_stack( on )
 #endif
 
-size_t GetRemoteSectionSize() {
+static HMODULE GetSelfModuleHandle() {
+    HMODULE hMod = nullptr;
+    if (!GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            (LPCSTR)&GetSelfModuleHandle,
+            &hMod)) {
+        return nullptr;
+    }
+    return hMod;
+}
 
-#if defined(_M_X64) || defined(__x86_64__)
-    PPEB_FULL pPeb = (PPEB_FULL)__readgsqword(0x60);
-#else
-    PPEB_FULL pPeb = (PPEB_FULL)__readfsdword(0x30);
-#endif
-    HMODULE hMod = pPeb ? (HMODULE)pPeb->ImageBaseAddress : nullptr;
+size_t GetRemoteSectionSize() {
+    HMODULE hMod = GetSelfModuleHandle();
     if (!hMod) {
         return 0;
     }
@@ -428,8 +433,30 @@ int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
     return -1;
 }
 
+typedef DWORD(NTAPI* pNtUserGetWDA)(HWND, DWORD*);
+
+static pNtUserGetWDA GetNtUserGetWDA() {
+    static pNtUserGetWDA fn = []() -> pNtUserGetWDA {
+        static constexpr auto obfWin32u = MAKE_OBF("win32u.dll");
+        static constexpr auto obfGetWDA = MAKE_OBF("NtUserGetWindowDisplayAffinity");
+        HMODULE h = DynGetModuleHandle(DECR_STR(obfWin32u).c_str());
+        if (!h) return nullptr;
+        return (pNtUserGetWDA)DynGetProcAddress(h, DECR_STR(obfGetWDA).c_str());
+    }();
+    return fn;
+}
+
 static BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
     if (!IsWindowVisible(hwnd)) return TRUE;
+
+    pNtUserGetWDA fnGetWDA = GetNtUserGetWDA();
+    if (fnGetWDA) {
+        DWORD affinity = 0;
+        if (fnGetWDA(hwnd, &affinity) == 0 || affinity == WDA_NONE) {
+            return TRUE;
+        }
+    }
+
     auto* processWindows = (std::map<DWORD, std::vector<HWND>>*)lParam;
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
@@ -598,7 +625,7 @@ static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger,
 
     if (!activeInjections.empty()) {
         for (size_t i = 0; i < activeInjections.size(); i++) {
-            WaitForSingleObject(hReadySemaphore.get(), 1000);
+            WaitForSingleObject(hReadySemaphore.get(), 150);
         }
     }
 

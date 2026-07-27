@@ -1,4 +1,3 @@
-
 #ifndef THIRDEYE_SBOX_SHRED_H
 #define THIRDEYE_SBOX_SHRED_H
 
@@ -31,12 +30,10 @@ constexpr uint8_t rotl8(uint8_t x, int n) {
 }
 
 constexpr uint8_t AffineSeedByte(int which) {
-    const char* t = __TIME__;
-    const char* d = __DATE__;
+    const char* seed = "thirdeye.sbox.v1";
     uint8_t v = 0;
-    for (int i = 0; t[i]; i++) v = (uint8_t)((v * 31) + (uint8_t)t[i]);
-    for (int i = 0; d[i]; i++) v = (uint8_t)((v * 17) ^ (uint8_t)d[i]);
-    return (uint8_t)(v ^ (0x63 + which * 0x9E) ^ (which * 0x37));
+    for (int i = 0; seed[i]; i++) v = (uint8_t)((v * 31) + (uint8_t)seed[i]);
+    return (uint8_t)(v ^ (0xA7 + which * 0x9E) ^ (which * 0x37));
 }
 
 constexpr uint8_t ComputeSBoxEntry(uint8_t x) {
@@ -56,7 +53,17 @@ struct SBoxTables {
 
 constexpr SBoxTables kTables{};
 
-constexpr uint8_t rcon[11] = { 0x8d, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36 };
+constexpr uint8_t MakeRcon(int i) {
+    const char* seed = "thirdeye.rcon.v1";
+    uint8_t v = (uint8_t)(0x5A ^ (i * 0x1D));
+    for (int k = 0; seed[k]; k++) v = (uint8_t)((v * 17) ^ (uint8_t)seed[k] ^ (uint8_t)i);
+    return v ? v : 0xA5;
+}
+
+constexpr uint8_t rcon[11] = {
+    MakeRcon(0), MakeRcon(1), MakeRcon(2), MakeRcon(3), MakeRcon(4),
+    MakeRcon(5), MakeRcon(6), MakeRcon(7), MakeRcon(8), MakeRcon(9), MakeRcon(10)
+};
 
 constexpr void KeyExpansion(const uint8_t* key, uint8_t* w) {
     for (int i = 0; i < 4; i++) {
@@ -128,7 +135,7 @@ constexpr void DecryptBlock(uint8_t* in, const uint8_t* key) {
     InvShiftRows(in); InvSubBytes(in); AddRoundKey(in, w);
 }
 
-} 
+}
 
 constexpr uint64_t FnvBasis(uint64_t round) {
     return 0xcbf29ce484222325ull ^ (round * 0x9e3779b97f4a7c15ull);
@@ -149,7 +156,6 @@ constexpr uint64_t NameHash() {
 #ifdef __FILE_NAME__
     return HashBytes(FnvBasis(2), __FILE_NAME__);
 #else
-
     const char* f = __FILE__; const char* base = f;
     for (const char* p = f; *p; ++p)
         if (*p == '/' || *p == '\\') base = p + 1;
@@ -164,17 +170,15 @@ struct LiteralKey {
         h ^= NAME_H * 0x9e3779b97f4a7c15ull;
         h = HashUint(h, CNT);
         h = HashUint(h, LINE);
-        h = HashBytes(h, __DATE__);
-        h = HashBytes(h, __TIME__);
+        h = HashUint(h, NAME_H ^ 0xddbeffcfebbull);
         return h;
     }
     static constexpr uint64_t Build2() {
         uint64_t h = FnvBasis(1);
-        h = HashBytes(h, __TIME__);
         h ^= NAME_H;
         h = HashUint(h, LINE * 0x100000001b3ull);
         h = HashUint(h, CNT * 0x9e3779b97f4a7c15ull);
-        h = HashBytes(h, __DATE__);
+        h = HashUint(h, NAME_H ^ 0x0123456789abcdefull);
         return h;
     }
     static constexpr void Fill(uint8_t* out) {
@@ -187,20 +191,28 @@ struct LiteralKey {
 template <size_t N, uint64_t NAME_H, uint64_t CNT, uint64_t LINE>
 struct Shredded {
     uint8_t data[((N + 15) / 16) * 16];
+    uint8_t key[16];
     size_t len;
 
-    constexpr Shredded(const char (&str)[N]) : data{}, len(N) {
-        uint8_t key[16];
+    constexpr Shredded(const char (&str)[N]) : data{}, key{}, len(N) {
         LiteralKey<NAME_H, CNT, LINE>::Fill(key);
         for (size_t i = 0; i < N; ++i) data[i] = (uint8_t)str[i];
         for (size_t b = 0; b < (N + 15) / 16; ++b) {
             aes::EncryptBlock(&data[b * 16], key);
         }
+
+        uint8_t check[sizeof(data)] = {};
+        for (size_t i = 0; i < sizeof(data); ++i) check[i] = data[i];
+        for (size_t b = 0; b < sizeof(check) / 16; ++b) {
+            aes::DecryptBlock(&check[b * 16], key);
+        }
+        for (size_t i = 0; i < N; ++i) {
+            int ok = (check[i] == (uint8_t)str[i]) ? 1 : 0;
+            (void)(1 / ok);
+        }
     }
 
     void reveal(char* out) const {
-        uint8_t key[16];
-        LiteralKey<NAME_H, CNT, LINE>::Fill(key);
         uint8_t tmp[sizeof(data)];
         std::memcpy(tmp, data, sizeof(tmp));
         for (size_t b = 0; b < sizeof(tmp) / 16; ++b) {
@@ -211,12 +223,10 @@ struct Shredded {
 
         volatile uint8_t* p = tmp;
         for (size_t i = 0; i < sizeof(tmp); ++i) p[i] = 0;
-        volatile uint8_t* k = key;
-        for (size_t i = 0; i < sizeof(key); ++i) k[i] = 0;
     }
 };
 
-} 
+}
 
 #define SHRED(str) shred_detail::Shredded<sizeof(str), \
     shred_detail::NameHash(), (uint64_t)__COUNTER__, (uint64_t)__LINE__>(str)

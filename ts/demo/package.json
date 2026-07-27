@@ -1,0 +1,21 @@
+{
+  "name": "thirdeye-demo",
+  "version": "1.0.0",
+  "description": "Minimal Electron demo for @lofcz/thirdeye - captures the screen (including a WDA_EXCLUDEFROMCAPTURE-protected window) to disk",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "start:invisible": "electron invisible.js"
+  },
+  "dependencies": {
+    "@lofcz/thirdeye": "^1.0.0"
+  },
+  "devDependencies": {
+    "electron": "^37.0.0"
+  },
+  "allowScripts": {
+    "electron@37.10.3": true,
+    "koffi@2.16.3": true
+  }
+}

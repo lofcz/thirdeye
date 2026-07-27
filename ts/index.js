@@ -86,11 +86,11 @@ function createBinding() {
 }
 
 function toStruct(b, options) {
-  const s = new b.ThirdeyeOptionsStruct();
-  s.format = options.format;
-  s.quality = options.quality;
-  s.bypassProtection = options.bypassProtection ? 1 : 0;
-  return s;
+  return {
+    format: options.format,
+    quality: options.quality,
+    bypassProtection: options.bypassProtection ? 1 : 0,
+  };
 }
 
 class ThirdEyeSession {
@@ -106,12 +106,13 @@ class ThirdEyeSession {
   }
 
   defaultOptions() {
-    const s = new this._b.ThirdeyeOptionsStruct();
+    const s = this._b.koffi.alloc(this._b.ThirdeyeOptionsStruct, 1);
     this._b.GetDefaultOptions(s);
+    const d = this._b.koffi.decode(s, this._b.ThirdeyeOptionsStruct);
     return {
-      format: s.format,
-      quality: s.quality,
-      bypassProtection: !!s.bypassProtection,
+      format: d.format,
+      quality: d.quality,
+      bypassProtection: !!d.bypassProtection,
     };
   }
 
