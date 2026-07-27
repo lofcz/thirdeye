@@ -15,44 +15,123 @@ Starring:
 
 ## Getting Started
 
-Install the package:
+<details open>
+<summary><b>C#</b> (.NET / NuGet)</summary>
+
+Install:
 
 ```
-dotnet add thirdeye
+dotnet add package ThirdEye
 ```
 
-### Usage (C#)
-
-Take screenshots unmasking any hidden windows:
+Use:
 
 ```cs
 using ThirdEye;
 
-using var session = new ThirdEyeSession()
-session.CaptureToFile("screenshot.png");
+using var session = new ThirdEyeSession();
+session.CaptureToFile("screenshot.jpg");
 ```
 
-Options are available:
+With options:
 
 ```cs
-using var session = new ThirdEyeSession();
 var options = new ThirdEyeOptions(
     format: ThirdeyeFormat.Jpeg,
     quality: 90,
     bypassProtection: true
 );
-    
 session.CaptureToFile("screenshot.jpeg", options);
 ```
 
-If needed, screenshots can be stored in memory:
+Capture to memory:
 
 ```cs
-using var session = new ThirdEyeSession()
-byte[] bufferData = session.CaptureToBuffer();
+byte[] buffer = session.CaptureToBuffer();
 ```
 
-### Usage (C/C++)
+</details>
+
+<details>
+<summary><b>JavaScript / TypeScript</b> (Node / npm)</summary>
+
+Install:
+
+```
+npm i @lofcz/thirdeye
+```
+
+Use:
+
+```ts
+import { ThirdEyeSession, ThirdeyeFormat } from '@lofcz/thirdeye';
+
+const session = new ThirdEyeSession();
+session.captureToFile('screenshot.jpg');
+session.close();
+```
+
+With options:
+
+```ts
+session.captureToFile('screenshot.jpeg', {
+  format: ThirdeyeFormat.Jpeg,
+  quality: 90,
+  bypassProtection: true,
+});
+```
+
+Capture to memory:
+
+```ts
+const buffer: Buffer = session.captureToBuffer();
+```
+
+</details>
+
+<details>
+<summary><b>Python</b> (PyPI)</summary>
+
+Install:
+
+```
+pip install eye3
+```
+
+Use:
+
+```python
+from eye3 import ThirdEyeSession, ThirdEyeOptions, ThirdeyeFormat
+
+with ThirdEyeSession() as session:
+    session.capture_to_file("screenshot.jpg")
+```
+
+With options:
+
+```python
+options = ThirdEyeOptions(
+    format=ThirdeyeFormat.JPEG,
+    quality=90,
+    bypass_protection=True,
+)
+session.capture_to_file("screenshot.jpeg", options)
+```
+
+Capture to memory:
+
+```python
+buffer: bytes = session.capture_to_buffer()
+```
+
+</details>
+
+<details>
+<summary><b>C / C++</b> (native)</summary>
+
+Install: download `thirdeye.dll` + `thirdeye_core.h` from the [latest release](https://github.com/lofcz/thirdeye/releases) (or build from `c/`).
+
+Use:
 
 ```cpp
 #include "thirdeye_core.h"
@@ -63,3 +142,24 @@ if (Thirdeye_CreateContext(&ctx) == THIRDEYE_OK) {
     Thirdeye_DestroyContext(ctx);
 }
 ```
+
+With options:
+
+```cpp
+ThirdeyeOptions options;
+Thirdeye_GetDefaultOptions(&options);
+options.format = THIRDEYE_FORMAT_JPEG;
+options.quality = 90;
+Thirdeye_CaptureToFile(ctx, L"screenshot.jpeg", &options);
+```
+
+Capture to memory:
+
+```cpp
+uint8_t* buffer = nullptr;
+uint32_t size = 0;
+Thirdeye_CaptureToBuffer(ctx, &buffer, &size, nullptr);
+Thirdeye_FreeBuffer(buffer);
+```
+
+</details>
