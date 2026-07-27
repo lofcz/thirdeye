@@ -622,6 +622,7 @@ static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger,
         }
     }
 
+#if defined(_DEBUG) || defined(THIRDEYE_DEBUG)
     std::ostringstream msg;
     msg << "bypass_diag processes=" << processWindows.size()
         << " skipped_blacklisted=" << skippedBlacklisted
@@ -634,6 +635,7 @@ static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger,
         << " thread_failed=" << threadFailed
         << " section_size=" << sectionSize;
     SetLastErrorMsg(ctx, msg.str().c_str());
+#endif
 
     return true;
 }
