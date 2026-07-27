@@ -78,23 +78,23 @@ jobs:
       - name: Configure
         shell: bash
         run: |
-          cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release \
+          cmake -G Ninja -S c -B c/build -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ -DCMAKE_RC_COMPILER=windres \
             -DTHIRDEYE_BUILD_TESTS=ON
 
       - name: Build
         shell: bash
-        run: cmake --build build --config Release --target thirdeye_dll
+        run: cmake --build c/build --config Release --target thirdeye_dll
 
       - name: Verify DLL exists
         shell: bash
-        run: test -f build/thirdeye.dll && echo "built build/thirdeye.dll"
+        run: test -f c/build/thirdeye.dll && echo "built c/build/thirdeye.dll"
 
       - name: Upload native DLL
         uses: actions/upload-artifact@v4
         with:
           name: thirdeye-dll
-          path: build/thirdeye.dll
+          path: c/build/thirdeye.dll
           if-no-files-found: error
           retention-days: 7
 
@@ -127,7 +127,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item staging/${{ env.DLL_NAME }} dist/${{ env.DLL_NAME }}
-          Copy-Item thirdeye_core.h dist/thirdeye_core.h
+          Copy-Item c/thirdeye_core.h dist/thirdeye_core.h
           Compress-Archive -Path dist/* -DestinationPath "dist/thirdeye-native-win-x64-${{ env.RELEASE_VERSION }}.zip" -Force
 
       - name: Upload zip artifact
@@ -174,7 +174,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish NuGet
-        if: matrix.target == 'nuget' && github.event.inputs.publish == true
+        if: matrix.target == 'nuget' && inputs.publish == true
         shell: pwsh
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
@@ -219,7 +219,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish npm (OIDC trusted publishing)
-        if: matrix.target == 'npm' && github.event.inputs.publish == true
+        if: matrix.target == 'npm' && inputs.publish == true
         working-directory: ts
         run: npm publish --access public
 
@@ -257,7 +257,7 @@ jobs:
   publish-pypi:
     name: Publish to PyPI (OIDC)
     needs: [version, release]
-    if: github.event.inputs.publish == true
+    if: inputs.publish == true
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -276,7 +276,7 @@ jobs:
   tag-release:
     name: Tag and create GitHub release
     needs: [version, release, publish-pypi]
-    if: github.event.inputs.publish == true && always() && needs.release.result == 'success' && needs.publish-pypi.result == 'success'
+    if: inputs.publish == true && always() && needs.release.result == 'success' && needs.publish-pypi.result == 'success'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

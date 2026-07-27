@@ -4,6 +4,7 @@ cmake-build-debug
 .code
 /cmake-build-release
 /build
+/c/build
 lge_test.jpg
 thirdeye.dll.c
 /tests/csharp_e2e/bin
