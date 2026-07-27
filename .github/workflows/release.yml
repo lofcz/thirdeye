@@ -37,15 +37,49 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Setup Node (for npm registry query)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.x"
+
       - name: Bump version from latest tag
         id: resolve
         shell: pwsh
         run: |
           $bump = "${{ github.event.inputs.release_type }}"
-          $latest = git tag -l "v*" | ForEach-Object { $_.TrimStart('v') } |
+
+          $candidates = @()
+
+          $tagVer = git tag -l "v*" | ForEach-Object { $_.TrimStart('v') } |
             Where-Object { $_ -match '^\d+\.\d+\.\d+$' } |
             Sort-Object { [version]$_ } | Select-Object -Last 1
-          if (-not $latest) { $latest = "1.0.0" }
+          if ($tagVer) { $candidates += [version]$tagVer }
+
+          try {
+            $npmVer = (npm view "@lofcz/thirdeye" version 2>$null).Trim()
+            if ($npmVer -match '^\d+\.\d+\.\d+$') { $candidates += [version]$npmVer }
+          } catch {}
+
+          try {
+            $pypiJson = Invoke-RestMethod -Uri "https://pypi.org/pypi/eye3/json" -ErrorAction Stop
+            $pypiVer = $pypiJson.info.version
+            if ($pypiVer -match '^\d+\.\d+\.\d+$') { $candidates += [version]$pypiVer }
+          } catch {}
+
+          try {
+            $nugetJson = Invoke-RestMethod -Uri "https://api.nuget.org/v3-flatcontainer/thirdeye/index.json" -ErrorAction Stop
+            $nugetVer = $nugetJson.versions | Where-Object { $_ -match '^\d+\.\d+\.\d+$' } |
+              Sort-Object { [version]$_ } | Select-Object -Last 1
+            if ($nugetVer) { $candidates += [version]$nugetVer }
+          } catch {}
+
+          if ($candidates.Count -gt 0) {
+            $latest = ($candidates | Sort-Object | Select-Object -Last 1).ToString()
+          } else {
+            $latest = "1.0.0"
+          }
+          Write-Host "Highest existing version across git/npm/PyPI/NuGet: $latest"
+
           $parts = $latest.Split('.')
           $major = [int]$parts[0]; $minor = [int]$parts[1]; $patch = [int]$parts[2]
           switch ($bump) {
@@ -149,7 +183,7 @@ jobs:
         if: matrix.target == 'nuget'
         shell: pwsh
         run: |
-          $dest = "dotnet/src/ThirdEye/runtimes/win-x64/native"
+          $dest = "net/src/ThirdEye/runtimes/win-x64/native"
           New-Item -ItemType Directory -Force $dest | Out-Null
           Copy-Item staging/${{ env.DLL_NAME }} "$dest/${{ env.NATIVE_DLL_NAME }}" -Force
 
@@ -157,13 +191,13 @@ jobs:
         if: matrix.target == 'nuget'
         shell: pwsh
         run: |
-          dotnet build dotnet/src/ThirdEye/ThirdEye.csproj -c Release /p:Version=${{ env.RELEASE_VERSION }}
+          dotnet build net/src/ThirdEye/ThirdEye.csproj -c Release /p:Version=${{ env.RELEASE_VERSION }}
 
       - name: Pack NuGet
         if: matrix.target == 'nuget'
         shell: pwsh
         run: |
-          dotnet pack dotnet/src/ThirdEye/ThirdEye.csproj -c Release --no-build -o nupkgs /p:Version=${{ env.RELEASE_VERSION }}
+          dotnet pack net/src/ThirdEye/ThirdEye.csproj -c Release --no-build -o nupkgs /p:Version=${{ env.RELEASE_VERSION }}
 
       - name: Upload NuGet artifact
         if: matrix.target == 'nuget'
@@ -179,10 +213,14 @@ jobs:
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         run: |
-          dotnet nuget push nupkgs/*.nupkg `
-            --source https://api.nuget.org/v3/index.json `
-            --api-key $env:NUGET_API_KEY `
-            --skip-duplicate
+          $pkgs = Get-ChildItem nupkgs\*.nupkg
+          if (-not $pkgs) { Write-Error "No nupkg found in nupkgs/"; exit 1 }
+          foreach ($pkg in $pkgs) {
+            dotnet nuget push $pkg.FullName `
+              --source https://api.nuget.org/v3/index.json `
+              --api-key $env:NUGET_API_KEY `
+              --skip-duplicate
+          }
 
       # ---------------- npm ----------------
       - name: Setup Node

@@ -7,8 +7,8 @@ cmake-build-debug
 /c/build
 lge_test.jpg
 thirdeye.dll.c
-/tests/csharp_e2e/bin
-/tests/csharp_e2e/obj
+/net/tests/csharp_e2e/bin
+/net/tests/csharp_e2e/obj
 /vt_variants
 
 /ts/bin
@@ -20,5 +20,5 @@ thirdeye.dll.c
 /python/build
 /python/*.egg-info
 __pycache__
-/dotnet/src/ThirdEye/runtimes
+/net/src/ThirdEye/runtimes
 /nupkgs
