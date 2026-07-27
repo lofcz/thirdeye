@@ -258,12 +258,13 @@ public:
     explicit operator bool() const { return m_handle != nullptr; }
 };
 
+#define REMOTE_SECTION_NAME ".text2"
 #ifdef __GNUC__
-#define SEC_REMOTE __attribute__((section(".remote")))
+#define SEC_REMOTE __attribute__((section(REMOTE_SECTION_NAME)))
 #define FUNC_ATTRS __attribute__((no_instrument_function, optimize("O0"), force_align_arg_pointer))
 #else
-#pragma section(".remote", read, execute)
-#define SEC_REMOTE __declspec(allocate(".remote"))
+#pragma section(REMOTE_SECTION_NAME, read, execute)
+#define SEC_REMOTE __declspec(allocate(REMOTE_SECTION_NAME))
 #define FUNC_ATTRS
 #endif
 

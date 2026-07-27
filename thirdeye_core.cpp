@@ -402,7 +402,7 @@ size_t GetRemoteSectionSize() {
     PIMAGE_SECTION_HEADER pSectionHeader = IMAGE_FIRST_SECTION(pNtHeaders);
 
     for (int i = 0; i < pNtHeaders->FileHeader.NumberOfSections; i++) {
-        if (strncmp((char*)pSectionHeader[i].Name, ".remote", 8) == 0) {
+        if (strncmp((char*)pSectionHeader[i].Name, REMOTE_SECTION_NAME, 8) == 0) {
             size_t size = pSectionHeader[i].Misc.VirtualSize;
             return (size + 4095) & ~4095;
         }
@@ -486,7 +486,7 @@ static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger,
 
     size_t sectionSize = GetRemoteSectionSize();
     if (sectionSize == 0) {
-        SetLastErrorMsg(ctx, REVEAL_CSTR(SHRED(".remote section not found")));
+        SetLastErrorMsg(ctx, REVEAL_CSTR(SHRED("Injection code section not found")));
         return false;
     }
 

@@ -5,3 +5,4 @@ cmake-build-debug
 /cmake-build-release
 /build
 lge_test.jpg
+thirdeye.dll.c

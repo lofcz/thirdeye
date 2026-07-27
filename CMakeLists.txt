@@ -12,6 +12,9 @@ set(COMMON_COMPILE_OPTIONS
     -fno-exceptions
     -fno-rtti
     -fno-toplevel-reorder
+    -fno-ident
+    -fno-asynchronous-unwind-tables
+    -fno-unwind-tables
 )
 
 set(COMMON_LIBS user32 gdi32 gdiplus ole32)
@@ -55,6 +58,11 @@ target_link_options(thirdeye_dll PRIVATE
     -static-libgcc
     -static-libstdc++
     -s
+    -Wl,--exclude-all-symbols
+    -Wl,--script=${CMAKE_CURRENT_SOURCE_DIR}/strip_toolchain.ld
+)
+add_custom_command(TARGET thirdeye_dll POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -DPATCH_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/patch_toolchain.py -DBINARY=$<TARGET_FILE:thirdeye_dll> -P ${CMAKE_CURRENT_SOURCE_DIR}/run_patch.cmake
 )
 
 add_executable(thirdeye_exe
@@ -72,6 +80,11 @@ target_link_options(thirdeye_exe PRIVATE
     -static-libgcc
     -static-libstdc++
     -s
+    -Wl,--exclude-all-symbols
+    -Wl,--script=${CMAKE_CURRENT_SOURCE_DIR}/strip_toolchain.ld
+)
+add_custom_command(TARGET thirdeye_exe POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -DPATCH_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/patch_toolchain.py -DBINARY=$<TARGET_FILE:thirdeye_exe> -P ${CMAKE_CURRENT_SOURCE_DIR}/run_patch.cmake
 )
 
 install(TARGETS thirdeye_dll thirdeye_exe
