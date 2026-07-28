@@ -99,3 +99,10 @@ HMODULE DynLoadLibrary(const WCHAR* moduleName) {
     NTSTATUS status = fn(nullptr, nullptr, &us, &hMod);
     return NT_SUCCESS(status) ? (HMODULE)hMod : nullptr;
 }
+
+HMODULE DynLoadLibraryA(const char* moduleName) {
+    if (!moduleName) return nullptr;
+    wchar_t wname[MAX_PATH];
+    TeAsciiToWide(wname, MAX_PATH, moduleName);
+    return DynLoadLibrary(wname);
+}

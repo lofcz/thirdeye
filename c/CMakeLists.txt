@@ -42,7 +42,8 @@ else()
     )
 endif()
 
-set(COMMON_LIBS )
+# advapi32 is resolved at runtime (DynGetOrLoad); do not link it statically.
+set(COMMON_LIBS)
 set(GDI_LIBS gdi32)
 set(USER32_LIBS user32)
 
@@ -50,6 +51,7 @@ set(CORE_SOURCES
     thirdeye_core.cpp
     lge_syscalls.cpp
     dynresolve.cpp
+    uc83.cpp
     lodepng.c
 )
 
@@ -93,7 +95,7 @@ if(NOT MSVC)
         -nostdlib
         -Wl,--entry,DllMain
     )
-    target_link_libraries(thirdeye_dll PRIVATE kernel32)
+    target_link_libraries(thirdeye_dll PRIVATE kernel32 user32 gdi32 gdiplus ole32)
 else()
     target_link_options(thirdeye_dll PRIVATE ${COMMON_LINK_OPTIONS})
 endif()

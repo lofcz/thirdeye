@@ -1,6 +1,8 @@
 #include <windows.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdarg.h>
+#include <wchar.h>
 
 void* malloc(size_t size) {
     if (size == 0) size = 1;
@@ -85,6 +87,59 @@ int strcmp(const char* a, const char* b) {
     while (*a && (*a == *b)) { ++a; ++b; }
     return (int)(unsigned char)*a - (int)(unsigned char)*b;
 }
+
+#if defined(__GNUC__)
+/* MinGW -nostdlib freestanding build: supply the wide-string helpers the
+ * elevation/capture paths use. MSVC links these from its CRT, so only define
+ * them under GCC to avoid redefinition. */
+size_t wcslen(const wchar_t* s) {
+    const wchar_t* p = s;
+    while (*p) ++p;
+    return (size_t)(p - s);
+}
+
+// Minimal wide swprintf supporting only %ls (wide string), %hs (narrow
+// string), %d/%u, and %% used by the elevation/capture paths. No floating
+// point. MinGW's headers redirect swprintf -> __mingw_swprintf, so define that
+// symbol to satisfy the compiler-generated references under -nostdlib.
+int __mingw_swprintf(wchar_t* buf, size_t /*count*/, const wchar_t* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    wchar_t* out = buf;
+    for (const wchar_t* f = fmt; *f; ++f) {
+        if (*f != L'%') { *out++ = *f; continue; }
+        ++f;
+        if (*f == L'%') { *out++ = L'%'; continue; }
+        wchar_t spec = *f;
+        int wide = 0;
+        if (spec == L'l') { wide = 1; spec = *++f; }
+        else if (spec == L'h') { wide = 0; spec = *++f; }
+        if (spec == L's') {
+            if (wide) {
+                const wchar_t* s = va_arg(ap, const wchar_t*);
+                while (s && *s) *out++ = *s++;
+            } else {
+                const char* s = va_arg(ap, const char*);
+                while (s && *s) *out++ = (wchar_t)*s++;
+            }
+        } else if (spec == L'd' || spec == L'u') {
+            long v = va_arg(ap, long);
+            wchar_t tmp[24];
+            int i = 0, neg = 0;
+            unsigned long uv;
+            if (spec == L'd' && v < 0) { neg = 1; uv = (unsigned long)(-v); }
+            else uv = (unsigned long)v;
+            if (uv == 0) tmp[i++] = L'0';
+            while (uv) { tmp[i++] = (wchar_t)(L'0' + (uv % 10)); uv /= 10; }
+            if (neg) *out++ = L'-';
+            while (i) *out++ = tmp[--i];
+        }
+    }
+    *out = 0;
+    va_end(ap);
+    return (int)(out - buf);
+}
+#endif /* __GNUC__ */
 
 float floorf(float x) {
     int64_t t = (int64_t)x;

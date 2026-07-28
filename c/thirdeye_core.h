@@ -36,11 +36,37 @@ typedef enum ThirdeyeFormat {
     THIRDEYE_FORMAT_BMP = 2,
 } ThirdeyeFormat;
 
+typedef enum ThirdeyeMode {
+    THIRDEYE_MODE_NOT_READY = 0, /* not armed (Prepare not accepted) */
+    THIRDEYE_MODE_NORMAL = 1,    /* armed, no elevated helper */
+    THIRDEYE_MODE_BUSY = 2,      /* Prepare in progress */
+    THIRDEYE_MODE_MASTER = 3,    /* armed + elevated helper ready */
+} ThirdeyeMode;
+
 typedef struct ThirdeyeOptions {
     ThirdeyeFormat format;
     int quality;
-    int bypassProtection;
+    int inclusive;
 } ThirdeyeOptions;
+
+/**
+ * Options for Thirdeye_Prepare. Always set `size` to sizeof(ThirdeyePrepareOptions)
+ * so new fields can be added without breaking older callers.
+ */
+typedef struct ThirdeyePrepareOptions {
+    uint32_t size;
+    /** Non-zero: start the elevated capture helper. */
+    int elevate;
+    uint32_t reserved0;
+    uint32_t reserved1;
+} ThirdeyePrepareOptions;
+
+typedef struct ThirdeyeState {
+    /** ThirdeyeMode */
+    int mode;
+    /** Helper process id when elevated helper is running, else 0 */
+    unsigned long pid;
+} ThirdeyeState;
 
 typedef struct ThirdeyeContext ThirdeyeContext;
 
@@ -69,9 +95,24 @@ THIRDEYE_API const char* THIRDEYE_CALL Thirdeye_GetLastError(ThirdeyeContext* co
 
 THIRDEYE_API const char* THIRDEYE_CALL Thirdeye_GetVersion(void);
 
+/**
+ * Authorize this process and optionally start the capture helper.
+ * `token` must match the host binding. `options` may be null (defaults).
+ * Returns 1 on success.
+ */
+THIRDEYE_API int THIRDEYE_CALL Thirdeye_Prepare(
+    const char* token,
+    const ThirdeyePrepareOptions* options
+);
+
+/** Tear down helper / revoke authorization. Idempotent. */
+THIRDEYE_API int THIRDEYE_CALL Thirdeye_Clean(void);
+
+/** Query mode + helper pid. Returns 1 on success. */
+THIRDEYE_API int THIRDEYE_CALL Thirdeye_State(ThirdeyeState* out);
+
 #ifdef __cplusplus
 }
 #endif
 
 #endif
-

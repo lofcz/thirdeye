@@ -182,6 +182,13 @@ int main() {
     Sleep(3000);
 
     printf("[*] phase 2: thirdeye bypass capture (expect marker present)\n");
+
+    ThirdeyePrepareOptions prep = {};
+    prep.size = (uint32_t)sizeof(prep);
+    prep.elevate = 0; // injection path (no Method 83)
+    int prepOk = Thirdeye_Prepare("third_eye_token", &prep);
+    CHECK(prepOk == 1, "Thirdeye_Prepare(elevate=0)");
+
     ThirdeyeContext* ctx = nullptr;
     ThirdeyeResult cr = Thirdeye_CreateContext(&ctx);
     CHECK(cr == THIRDEYE_OK && ctx != nullptr, "Thirdeye_CreateContext");
@@ -192,7 +199,7 @@ int main() {
         Thirdeye_GetDefaultOptions(&opts);
         opts.format = THIRDEYE_FORMAT_JPEG;
         opts.quality = 95;
-        opts.bypassProtection = 1;
+        opts.inclusive = 1;
 
         uint8_t* buf = nullptr;
         uint32_t size = 0;
@@ -215,6 +222,7 @@ int main() {
         }
         Thirdeye_DestroyContext(ctx);
     }
+    Thirdeye_Clean();
 
     if (pi.hProcess) {
         TerminateProcess(pi.hProcess, 0);

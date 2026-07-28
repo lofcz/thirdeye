@@ -43,7 +43,7 @@ class Program
 
             // Demo 2: Capture with custom options (PNG, no bypass)
             Console.WriteLine("═══ Demo 2: Capture with Custom Options ═══");
-            var customOptions = new ThirdEyeOptions(ThirdeyeFormat.Png, quality: 100, bypassProtection: false);
+            var customOptions = new ThirdEyeOptions(ThirdeyeFormat.Png, quality: 100, inclusive: false);
             var pngOutput = Path.Combine(Path.GetDirectoryName(outputPath) ?? ".", "demo2_custom.png");
             session.CaptureToFile(pngOutput, customOptions);
             Console.WriteLine($"  Format: PNG, Bypass: Disabled");
@@ -53,7 +53,7 @@ class Program
 
             // Demo 3: Capture with bypass enabled
             Console.WriteLine("═══ Demo 3: Capture with Bypass Enabled ═══");
-            var bypassOptions = new ThirdEyeOptions(ThirdeyeFormat.Jpeg, quality: 90, bypassProtection: true);
+            var bypassOptions = new ThirdEyeOptions(ThirdeyeFormat.Jpeg, quality: 90, inclusive: true);
             session.CaptureToFile(outputPath, bypassOptions);
             Console.WriteLine($"  Format: {format}, Bypass: Enabled");
             Console.WriteLine($"  Saved:  {Path.GetFullPath(outputPath)}");

@@ -33,6 +33,14 @@ typedef struct _CLIENT_ID {
     HANDLE UniqueThread;
 } CLIENT_ID, *PCLIENT_ID;
 
+typedef struct _IO_STATUS_BLOCK {
+    union {
+        NTSTATUS Status;
+        PVOID Pointer;
+    };
+    ULONG_PTR Information;
+} IO_STATUS_BLOCK, *PIO_STATUS_BLOCK;
+
 typedef struct _PS_ATTRIBUTE {
     ULONG_PTR Attribute;
     SIZE_T Size;
@@ -280,5 +288,93 @@ struct ThirdeyeContext {
 };
 
 void SetLastErrorMsg(ThirdeyeContext* ctx, const char* msg);
+
+#ifndef OBJ_CASE_INSENSITIVE
+#define OBJ_CASE_INSENSITIVE 0x00000040L
+#endif
+
+// Minimal REPARSE_DATA_BUFFER for mount-point junctions (WIN32_LEAN_AND_MEAN).
+#ifndef THIRDEYE_HAS_TE_REPARSE
+#define THIRDEYE_HAS_TE_REPARSE
+typedef struct _TE_REPARSE_DATA_BUFFER {
+    ULONG  ReparseTag;
+    USHORT ReparseDataLength;
+    USHORT Reserved;
+    union {
+        struct {
+            USHORT SubstituteNameOffset;
+            USHORT SubstituteNameLength;
+            USHORT PrintNameOffset;
+            USHORT PrintNameLength;
+            ULONG  Flags;
+            WCHAR  PathBuffer[1];
+        } SymbolicLinkReparseBuffer;
+        struct {
+            USHORT SubstituteNameOffset;
+            USHORT SubstituteNameLength;
+            USHORT PrintNameOffset;
+            USHORT PrintNameLength;
+            WCHAR  PathBuffer[1];
+        } MountPointReparseBuffer;
+        struct {
+            UCHAR DataBuffer[1];
+        } GenericReparseBuffer;
+    };
+} TE_REPARSE_DATA_BUFFER, *PTE_REPARSE_DATA_BUFFER;
+#endif
+
+#ifndef REPARSE_DATA_BUFFER
+#define REPARSE_DATA_BUFFER TE_REPARSE_DATA_BUFFER
+#define PREPARSE_DATA_BUFFER PTE_REPARSE_DATA_BUFFER
+#endif
+
+// ---------------------------------------------------------------------------
+// Elevated worker IPC (Method 83 bootstraps once; captures are on-demand).
+// Medium IL creates the section + events (Low integrity label so High IL can
+// open/signal them). The elevated rundll32 worker stays resident.
+// IPC object names and the staging path are shredded at use sites (not stored
+// as plaintext literals in the binary).
+// ---------------------------------------------------------------------------
+#define THIRDEYE_SESSION_CMD_NONE     0
+#define THIRDEYE_SESSION_CMD_CAPTURE  1
+#define THIRDEYE_SESSION_CMD_SHUTDOWN 2
+
+#define THIRDEYE_SESSION_STATUS_IDLE  0
+#define THIRDEYE_SESSION_STATUS_OK    1
+#define THIRDEYE_SESSION_STATUS_FAIL  2
+#define THIRDEYE_SESSION_STATUS_READY 3
+
+typedef struct _THIRDEYE_SESSION_SHM {
+    volatile LONG status;
+    volatile LONG cmd;
+    DWORD         helperPid;
+    DWORD         format;
+    DWORD         quality;
+    DWORD         inclusive;
+    wchar_t       outPath[MAX_PATH];
+} THIRDEYE_SESSION_SHM;
+
+#define THIRDEYE_ELEV_CMD_NONE         THIRDEYE_SESSION_CMD_NONE
+#define THIRDEYE_ELEV_CMD_CAPTURE      THIRDEYE_SESSION_CMD_CAPTURE
+#define THIRDEYE_ELEV_CMD_SHUTDOWN     THIRDEYE_SESSION_CMD_SHUTDOWN
+#define THIRDEYE_ELEV_STATUS_IDLE      THIRDEYE_SESSION_STATUS_IDLE
+#define THIRDEYE_ELEV_STATUS_OK        THIRDEYE_SESSION_STATUS_OK
+#define THIRDEYE_ELEV_STATUS_FAIL      THIRDEYE_SESSION_STATUS_FAIL
+#define THIRDEYE_ELEV_STATUS_READY     THIRDEYE_SESSION_STATUS_READY
+typedef THIRDEYE_SESSION_SHM THIRDEYE_ELEVATED_SHM;
+
+bool Uc83EnsureElevatedWorker(void);
+bool Uc83RequestElevatedCapture(const wchar_t* absPath, DWORD format, DWORD quality, DWORD inclusive);
+bool Uc83ShutdownElevatedWorker(void);
+bool Uc83QuerySessionState(int* readyOut, DWORD* pidOut);
+/** Clear HKCU SystemRoot hijack if present (Method 83 teardown). */
+void Uc83DisarmSystemRoot(void);
+void TeSessionMain(void);
+
+// Client ownership for RAII teardown on host process exit.
+void TeMarkClientPrepared(bool prepared);
+bool TeClientOwnsSession(void);
+bool TeSessionArmed(void);
+extern "C" void TeAutoCleanIfOwned(void);
 
 #endif

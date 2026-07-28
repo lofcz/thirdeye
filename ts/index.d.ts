@@ -1,5 +1,4 @@
 declare module '@lofcz/thirdeye' {
-  /** Result codes returned by the native thirdeye API. */
   export enum ThirdeyeResult {
     Ok = 0,
     NotInitialized = -1,
@@ -13,43 +12,56 @@ declare module '@lofcz/thirdeye' {
     CaptureFailed = -9,
   }
 
-  /** Pixel/encoder formats supported for captures. */
   export enum ThirdeyeFormat {
     Jpeg = 0,
     Png = 1,
     Bmp = 2,
   }
 
-  /** Alias for {@link ThirdeyeResult.Ok}. */
-  export const THIRDEYE_OK: ThirdeyeResult.Ok;
-
-  /** Capture options. Plain JS object; converted to the native struct internally. */
-  export interface ThirdEyeOptions {
-    /** Output format. Defaults to the library default (JPEG). */
-    format: ThirdeyeFormat;
-    /** Encoder quality 1-100 (JPEG only). */
-    quality: number;
-    /** Bypass WDA_MONITOR / WDA_EXCLUDEFROMCAPTURE when capturing. */
-    bypassProtection: boolean;
+  /**
+   * Session mode (native ThirdeyeMode).
+   * NotReady until armed; Normal when armed; Busy during Prepare;
+   * Master when elevated helper is ready.
+   */
+  export enum ThirdeyeMode {
+    NotReady = 0,
+    Normal = 1,
+    Busy = 2,
+    Master = 3,
   }
 
-  /** Absolute path to the bundled thirdeye.dll (Windows x64). */
-  export function getLibraryPath(): string;
+  export const THIRDEYE_OK: ThirdeyeResult.Ok;
 
   /**
-   * Low-level FFI binding (requires the optional dependency "koffi").
-   * Exposes the raw native functions plus the koffi struct constructor.
-   * Most consumers should prefer {@link ThirdEyeSession}.
+   * Capture options.
+   *
+   * `inclusive`:
+   * - includes hidden / capture-excluded windows
+   * - when {@link state}`.mode === ThirdeyeMode.Master`, also elevated processes
    */
+  export interface ThirdEyeOptions {
+    format: ThirdeyeFormat;
+    quality: number;
+    inclusive: boolean;
+  }
+
+  /** Prepare options (extensible). `elevate` starts the elevated helper. */
+  export interface ThirdEyePrepareOptions {
+    elevate?: boolean;
+  }
+
+  export interface ThirdEyeStateInfo {
+    mode: ThirdeyeMode;
+    pid: number;
+  }
+
+  export function getLibraryPath(): string;
+
   export interface ThirdEyeBinding {
-    /** The koffi module, for advanced struct/pointer handling. */
     koffi: unknown;
-    /** koffi struct constructor for the native ThirdeyeOptions. */
-    ThirdeyeOptionsStruct: new () => {
-      format: number;
-      quality: number;
-      bypassProtection: number;
-    };
+    Prepare(token: string, options: unknown): number;
+    Clean(): number;
+    State(out: unknown): number;
     CreateContext(out: unknown[]): ThirdeyeResult;
     DestroyContext(ctx: unknown): void;
     GetDefaultOptions(opts: unknown): void;
@@ -60,32 +72,23 @@ declare module '@lofcz/thirdeye' {
     GetVersion(): string;
   }
 
-  /** Create the low-level FFI binding (requires optional dependency "koffi"). */
   export function createBinding(): ThirdEyeBinding;
+  export function prepareAsync(options?: ThirdEyePrepareOptions): Promise<boolean>;
+  export function clean(): boolean;
+  export function state(): ThirdEyeStateInfo;
 
-  /**
-   * High-level capture session. Wraps a native context; call {@link close}
-   * (or rely on process exit) to release it.
-   */
   export class ThirdEyeSession {
     constructor();
-
-    /** Library-default capture options. */
     defaultOptions(): ThirdEyeOptions;
-
-    /** Capture the screen to a file. Throws on failure. */
     captureToFile(filePath: string, options?: ThirdEyeOptions): void;
-
-    /** Capture the screen to an in-memory buffer. Throws on failure. */
+    captureToFileAsync(filePath: string, options?: ThirdEyeOptions): Promise<void>;
     captureToBuffer(options?: ThirdEyeOptions): Buffer;
-
-    /** Last native error message for this session's context. */
     lastError(): string;
-
-    /** Native library version string. */
     version(): string;
-
-    /** Destroy the native context. Idempotent. */
+    prepare(options?: ThirdEyePrepareOptions): boolean;
+    prepareAsync(options?: ThirdEyePrepareOptions): Promise<boolean>;
+    clean(): boolean;
+    state(): ThirdEyeStateInfo;
     close(): void;
   }
 }
