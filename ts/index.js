@@ -42,6 +42,7 @@ const ThirdeyeResult = Object.freeze({
   AllocationFailed: -6,
   InvalidParam: -7,
   NoRemoteSection: -8,
+  CaptureFailed: -9,
 });
 
 const ThirdeyeFormat = Object.freeze({

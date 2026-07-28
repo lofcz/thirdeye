@@ -2,15 +2,12 @@
 #define THIRDEYE_INTERNAL_H
 
 #include <windows.h>
-#include <vector>
-#include <string>
-#include <map>
 #include <cstring>
 
 #include "sbox_shred.h"
 
 #define MAKE_OBF(str) SHRED(str)
-#define DECR_STR(obf) REVEAL_STR(obf)
+#define DECR_STR(obf) REVEAL_CSTR(obf)
 
 typedef LONG NTSTATUS;
 #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
@@ -224,9 +221,10 @@ struct INJECTION_DATA {
 };
 
 template<size_t N>
-static inline bool SafeCopyString(char (&dest)[N], const std::string& src) {
-    if (src.length() >= N) return false;
-    memcpy(dest, src.c_str(), src.length() + 1);
+static inline bool SafeCopyString(char (&dest)[N], const char* src) {
+    size_t len = strlen(src);
+    if (len >= N) return false;
+    memcpy(dest, src, len + 1);
     return true;
 }
 
@@ -258,17 +256,24 @@ public:
     explicit operator bool() const { return m_handle != nullptr; }
 };
 
-#define REMOTE_SECTION_NAME ".text2"
+#define REMOTE_SECTION_NAME ".text$mn"
 #ifdef __GNUC__
 #define SEC_REMOTE __attribute__((section(REMOTE_SECTION_NAME)))
 #define FUNC_ATTRS __attribute__((no_instrument_function, optimize("O0"), force_align_arg_pointer))
 #else
 #pragma section(REMOTE_SECTION_NAME, read, execute)
-#define SEC_REMOTE __declspec(allocate(REMOTE_SECTION_NAME))
+#define SEC_REMOTE
 #define FUNC_ATTRS
 #endif
 
+#ifndef __GNUC__
+#pragma code_seg(push, remote_seg, REMOTE_SECTION_NAME)
+#endif
 extern "C" SEC_REMOTE FUNC_ATTRS DWORD __stdcall RemoteThreadProc(LPVOID lpParameter);
+extern "C" SEC_REMOTE FUNC_ATTRS void __stdcall RemoteThreadProcEnd();
+#ifndef __GNUC__
+#pragma code_seg(pop, remote_seg)
+#endif
 
 struct ThirdeyeContext {
     char lastError[256];

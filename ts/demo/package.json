@@ -9,10 +9,10 @@
     "start:invisible": "electron invisible.js"
   },
   "dependencies": {
-    "@lofcz/thirdeye": "^1.0.4"
+    "@lofcz/thirdeye": "^1.0.5"
   },
   "devDependencies": {
-    "electron": "^37.0.0"
+    "electron": "^43.2.0"
   },
   "allowScripts": {
     "electron@37.10.3": true,

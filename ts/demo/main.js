@@ -5,9 +5,6 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { ThirdEyeSession, ThirdeyeFormat } = require('@lofcz/thirdeye');
 
-// Capture must see real screen pixels, not a DPI-virtualized view. Opt out of
-// per-monitor DPI scaling for this process so the GDI capture coordinates line
-// up with the physical desktop at any scale factor.
 app.commandLine.appendSwitch('high-dpi-support', '1');
 app.commandLine.appendSwitch('force-device-scale-factor', '1');
 
@@ -59,13 +56,17 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
-  ipcMain.handle('capture', () => {
+  let captureQueue = Promise.resolve();
+  let captureCounter = 0;
+
+  const runCapture = () => {
+    captureCounter += 1;
     const stamp = new Date()
       .toISOString()
       .replace(/[:.]/g, '-')
       .replace('T', '_')
-      .slice(0, 19);
-    const filePath = path.join(app.getAppPath(), `capture_${stamp}.jpg`);
+      .slice(0, 23);
+    const filePath = path.join(app.getAppPath(), `capture_${stamp}_${captureCounter}.jpg`);
 
     try {
       const s = getSession();
@@ -79,6 +80,12 @@ app.whenReady().then(() => {
     } catch (err) {
       return { ok: false, error: String(err && err.message ? err.message : err) };
     }
+  };
+
+  ipcMain.handle('capture', () => {
+    const result = captureQueue.then(runCapture, runCapture);
+    captureQueue = result.catch(() => {});
+    return result;
   });
 
   ipcMain.handle('spawn-invisible', () => {

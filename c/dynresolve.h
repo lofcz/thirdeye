@@ -5,7 +5,7 @@
 #include <windows.h>
 
 HMODULE DynGetModuleHandle(const char* moduleName);
-
 FARPROC DynGetProcAddress(HMODULE moduleBase, const char* funcName);
+HMODULE DynLoadLibrary(const WCHAR* moduleName);
 
 #endif

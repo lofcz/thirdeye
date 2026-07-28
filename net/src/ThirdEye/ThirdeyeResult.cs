@@ -31,5 +31,8 @@ public enum ThirdeyeResult
     
     /// <summary>No remote section available for bypass.</summary>
     ErrorNoRemoteSection = -8,
+
+    /// <summary>Screen capture failed.</summary>
+    ErrorCaptureFailed = -9,
 }
 
