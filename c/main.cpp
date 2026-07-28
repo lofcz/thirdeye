@@ -23,7 +23,7 @@ static void Capture(ThirdeyeContext* ctx) {
     Thirdeye_GetDefaultOptions(&opts);
     opts.format = THIRDEYE_FORMAT_JPEG;
     opts.quality = 90;
-    opts.bypassProtection = 1;
+    opts.inclusive = 1;
 
     ThirdeyeResult result = Thirdeye_CaptureToFile(ctx, filename.c_str(), &opts);
 

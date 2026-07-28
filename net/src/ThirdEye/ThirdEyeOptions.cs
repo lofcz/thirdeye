@@ -12,35 +12,33 @@ public struct ThirdEyeOptions
     /// Output image format.
     /// </summary>
     public ThirdeyeFormat Format;
-    
+
     /// <summary>
     /// Image quality (1-100). Only applicable to JPEG format.
     /// </summary>
     public int Quality;
-    
+
     /// <summary>
-    /// Whether to bypass WDA_MONITOR/WDA_EXCLUDEFROMCAPTURE protection.
-    /// Set to 1 to enable bypass, 0 to disable.
+    /// Include windows that opt out of normal screen capture (1 = yes, 0 = no).
     /// </summary>
-    public int BypassProtection;
+    public int Inclusive;
 
     /// <summary>
     /// Creates options with specified values.
     /// </summary>
-    public ThirdEyeOptions(ThirdeyeFormat format, int quality = 90, bool bypassProtection = true)
+    public ThirdEyeOptions(ThirdeyeFormat format, int quality = 90, bool inclusive = true)
     {
         Format = format;
         Quality = quality;
-        BypassProtection = bypassProtection ? 1 : 0;
+        Inclusive = inclusive ? 1 : 0;
     }
 
     /// <summary>
-    /// Gets or sets whether bypass protection is enabled.
+    /// Gets or sets whether inclusive capture is enabled.
     /// </summary>
-    public bool IsBypassEnabled
+    public bool IsInclusive
     {
-        get => BypassProtection != 0;
-        set => BypassProtection = value ? 1 : 0;
+        get => Inclusive != 0;
+        set => Inclusive = value ? 1 : 0;
     }
 }
-

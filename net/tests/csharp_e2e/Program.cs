@@ -34,7 +34,7 @@ namespace Thirdeye.E2E
         {
             public ThirdeyeFormat format;
             public int quality;
-            public int bypassProtection;
+            public int inclusive;
         }
 
         [DllImport("thirdeye.dll", CallingConvention = CallingConvention.StdCall)]
@@ -232,7 +232,7 @@ namespace Thirdeye.E2E
                 Native.Thirdeye_GetDefaultOptions(out opts);
                 opts.format = Native.ThirdeyeFormat.JPEG;
                 opts.quality = 95;
-                opts.bypassProtection = 1;
+                opts.inclusive = 1;
 
                 IntPtr buf;
                 uint size;

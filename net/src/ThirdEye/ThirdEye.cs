@@ -6,8 +6,7 @@ namespace ThirdEye;
 
 /// <summary>
 /// Main entry point for ThirdEye screen capture functionality.
-/// Provides methods to capture screenshots with optional bypass of display protection.
-/// This class is thread-safe.
+/// Provides methods to capture screenshots. This class is thread-safe.
 /// </summary>
 public class ThirdEyeSession : IDisposable
 {
@@ -43,6 +42,7 @@ public class ThirdEyeSession : IDisposable
     {
         if (!_disposed)
         {
+            try { Native_Clean(); } catch { /* best-effort */ }
             if (_context != IntPtr.Zero)
             {
                 Native_DestroyContext(_context);
@@ -62,6 +62,17 @@ public class ThirdEyeSession : IDisposable
 
     [DllImport(DllName, CallingConvention = CallingConvention.StdCall, EntryPoint = "Thirdeye_GetDefaultOptions")]
     private static extern void Native_GetDefaultOptions(ref ThirdEyeOptions options);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi, EntryPoint = "Thirdeye_Prepare")]
+    private static extern int Native_Prepare(string token, ref ThirdeyePrepareOptions options);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.StdCall, EntryPoint = "Thirdeye_Clean")]
+    private static extern int Native_Clean();
+
+    [DllImport(DllName, CallingConvention = CallingConvention.StdCall, EntryPoint = "Thirdeye_State")]
+    private static extern int Native_State(out ThirdeyeState state);
+
+    private const string PrepareToken = "third_eye_token";
 
     [DllImport(DllName, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode, EntryPoint = "Thirdeye_CaptureToFile")]
     private static extern ThirdeyeResult Native_CaptureToFile(
@@ -109,12 +120,38 @@ public class ThirdEyeSession : IDisposable
     /// <summary>
     /// Get the default capture options.
     /// </summary>
-    /// <returns>Default options (JPEG, quality 90, bypass enabled).</returns>
+    /// <returns>Default options (JPEG, quality 90, inclusive).</returns>
     public static ThirdEyeOptions GetDefaultOptions()
     {
         var options = new ThirdEyeOptions();
         Native_GetDefaultOptions(ref options);
         return options;
+    }
+
+    /// <summary>
+    /// Authorize the library. When <paramref name="elevate"/> is true, also
+    /// starts the elevated capture helper.
+    /// </summary>
+    /// <remarks>
+    /// Capture Inclusive: hidden/excluded windows; when state is Master and
+    /// elevate was requested, also elevated processes.
+    /// State: Normal | Busy | Master.
+    /// </remarks>
+    public static bool Prepare(bool elevate = true)
+    {
+        var opts = ThirdeyePrepareOptions.Create(elevate);
+        return Native_Prepare(PrepareToken, ref opts) != 0;
+    }
+
+    /// <summary>Tear down helper / revoke authorization.</summary>
+    public static bool Clean() => Native_Clean() != 0;
+
+    /// <summary>Query session mode + helper pid.</summary>
+    public static ThirdeyeState State()
+    {
+        if (Native_State(out var state) == 0)
+            return default;
+        return state;
     }
 
     /// <summary>

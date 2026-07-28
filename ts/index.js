@@ -2,9 +2,13 @@
 
 const path = require('path');
 const fs = require('fs');
+const { Worker } = require('worker_threads');
 
 const DLL_NAME = 'thirdeye.dll';
 const bundled = path.join(__dirname, 'bin', DLL_NAME);
+const WORKER_SCRIPT = path.join(__dirname, 'worker-thread.js');
+
+const PREPARE_TOKEN = 'third_eye_token';
 
 function getLibraryPath() {
   if (!fs.existsSync(bundled)) {
@@ -51,16 +55,41 @@ const ThirdeyeFormat = Object.freeze({
   Bmp: 2,
 });
 
+/**
+ * Session mode (matches native ThirdeyeMode).
+ * NotReady — until armed; Normal — armed; Busy — Prepare; Master — elevated helper.
+ */
+const ThirdeyeMode = Object.freeze({
+  NotReady: 0,
+  Normal: 1,
+  Busy: 2,
+  Master: 3,
+});
+
 const THIRDEYE_OK = ThirdeyeResult.Ok;
 
+let _binding = null;
 function createBinding() {
+  if (_binding) return _binding;
   const lib = _load();
   const koffi = require('koffi');
 
   const ThirdeyeOptionsStruct = koffi.struct('ThirdeyeOptions', {
     format: 'int',
     quality: 'int',
-    bypassProtection: 'int',
+    inclusive: 'int',
+  });
+
+  const ThirdeyePrepareOptionsStruct = koffi.struct('ThirdeyePrepareOptions', {
+    size: 'uint32',
+    elevate: 'int',
+    reserved0: 'uint32',
+    reserved1: 'uint32',
+  });
+
+  const ThirdeyeStateStruct = koffi.struct('ThirdeyeState', {
+    mode: 'int',
+    pid: 'uint32',
   });
 
   const CreateContext = lib.func('int __stdcall Thirdeye_CreateContext(_Out_ void **ppContext)');
@@ -71,10 +100,17 @@ function createBinding() {
   const FreeBuffer = lib.func('void __stdcall Thirdeye_FreeBuffer(uint8_t *buffer)');
   const GetLastError = lib.func('const char * __stdcall Thirdeye_GetLastError(void *context)');
   const GetVersion = lib.func('const char * __stdcall Thirdeye_GetVersion(void)');
+  const Prepare = lib.func(
+    'int __stdcall Thirdeye_Prepare(const char *token, const ThirdeyePrepareOptions *options)',
+  );
+  const Clean = lib.func('int __stdcall Thirdeye_Clean(void)');
+  const State = lib.func('int __stdcall Thirdeye_State(_Out_ ThirdeyeState *out)');
 
-  return {
+  _binding = {
     koffi,
     ThirdeyeOptionsStruct,
+    ThirdeyePrepareOptionsStruct,
+    ThirdeyeStateStruct,
     CreateContext,
     DestroyContext,
     GetDefaultOptions,
@@ -83,15 +119,119 @@ function createBinding() {
     FreeBuffer,
     GetLastError,
     GetVersion,
+    Prepare,
+    Clean,
+    State,
   };
+  return _binding;
 }
 
-function toStruct(b, options) {
+function toStruct(options) {
   return {
     format: options.format,
     quality: options.quality,
-    bypassProtection: options.bypassProtection ? 1 : 0,
+    inclusive: options.inclusive ? 1 : 0,
   };
+}
+
+function prepareOptionsStruct(elevate) {
+  return {
+    size: 16,
+    elevate: elevate ? 1 : 0,
+    reserved0: 0,
+    reserved1: 0,
+  };
+}
+
+function resolveKoffiPath() {
+  try {
+    return require.resolve('koffi');
+  } catch {
+    throw new Error(
+      'thirdeye: the high-level API requires the optional "koffi" package. ' +
+      'Install it (npm i koffi) or use getLibraryPath() with your own FFI.'
+    );
+  }
+}
+
+function runNativeWorker(op, args) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(WORKER_SCRIPT, {
+      workerData: {
+        dllPath: getLibraryPath(),
+        koffiPath: resolveKoffiPath(),
+        token: PREPARE_TOKEN,
+        op,
+        args: args || null,
+      },
+    });
+    let settled = false;
+    const finish = (err, value) => {
+      if (settled) return;
+      settled = true;
+      worker.terminate().catch(() => {});
+      if (err) reject(err);
+      else resolve(value);
+    };
+    worker.on('message', (msg) => {
+      if (!msg || !msg.ok) {
+        finish(new Error((msg && msg.error) || 'native worker failed'));
+        return;
+      }
+      finish(null, msg.result);
+    });
+    worker.on('error', (err) => finish(err));
+    worker.on('exit', (code) => {
+      if (!settled && code !== 0) {
+        finish(new Error(`native worker exited with code ${code}`));
+      }
+    });
+  });
+}
+
+let _preparePromise = null;
+
+/**
+ * Authorize the native library and optionally start the elevated helper.
+ *
+ * @param {{ elevate?: boolean }} [options]
+ *
+ * Capture options.inclusive:
+ * - includes hidden / capture-excluded windows
+ * - when state().mode === ThirdeyeMode.Master, also elevated processes
+ *
+ * state().mode: ThirdeyeMode.NotReady | Normal | Busy | Master
+ * - NotReady until armed; Normal when armed; Busy during Prepare; Master with helper
+ */
+function prepareAsync(options) {
+  const elevate = !options || options.elevate !== false;
+  if (_preparePromise) return _preparePromise;
+  _preparePromise = runNativeWorker('prepare', { elevate }).then(
+    (ok) => !!ok,
+    (err) => {
+      _preparePromise = null;
+      throw err;
+    },
+  );
+  return _preparePromise;
+}
+
+function clean() {
+  _preparePromise = null;
+  try {
+    return !!createBinding().Clean();
+  } catch {
+    return false;
+  }
+}
+
+/** @returns {{ mode: number, pid: number }} */
+function state() {
+  const b = createBinding();
+  const s = b.koffi.alloc(b.ThirdeyeStateStruct, 1);
+  if (!b.State(s)) return { mode: ThirdeyeMode.NotReady, pid: 0 };
+  const d = b.koffi.decode(s, b.ThirdeyeStateStruct);
+  return { mode: d.mode | 0, pid: d.pid >>> 0 };
 }
 
 class ThirdEyeSession {
@@ -113,23 +253,36 @@ class ThirdEyeSession {
     return {
       format: d.format,
       quality: d.quality,
-      bypassProtection: !!d.bypassProtection,
+      /**
+       * inclusive:
+       * - includes hidden / capture-excluded windows
+       * - when state().mode === ThirdeyeMode.Master, also elevated processes
+       */
+      inclusive: !!d.inclusive,
     };
   }
 
   captureToFile(filePath, options) {
     const opts = options || this.defaultOptions();
-    const rc = this._b.CaptureToFile(this._ctx, String(filePath), toStruct(this._b, opts));
+    const rc = this._b.CaptureToFile(this._ctx, String(filePath), toStruct(opts));
     if (rc !== THIRDEYE_OK) {
       throw new Error(`Thirdeye_CaptureToFile failed (rc=${rc}): ${this.lastError()}`);
     }
+  }
+
+  async captureToFileAsync(filePath, options) {
+    const opts = options || this.defaultOptions();
+    if (opts.inclusive) {
+      await prepareAsync({ elevate: true });
+    }
+    await runNativeWorker('captureToFile', { filePath: String(filePath), options: opts });
   }
 
   captureToBuffer(options) {
     const opts = options || this.defaultOptions();
     const bufOut = [null];
     const sizeOut = [0];
-    const rc = this._b.CaptureToBuffer(this._ctx, bufOut, sizeOut, toStruct(this._b, opts));
+    const rc = this._b.CaptureToBuffer(this._ctx, bufOut, sizeOut, toStruct(opts));
     if (rc !== THIRDEYE_OK || !bufOut[0] || !sizeOut[0]) {
       throw new Error(`Thirdeye_CaptureToBuffer failed (rc=${rc}): ${this.lastError()}`);
     }
@@ -148,7 +301,26 @@ class ThirdEyeSession {
     return this._b.GetVersion();
   }
 
+  /** @param {{ elevate?: boolean }} [options] */
+  prepare(options) {
+    const elevate = !options || options.elevate !== false;
+    return !!this._b.Prepare(PREPARE_TOKEN, prepareOptionsStruct(elevate));
+  }
+
+  prepareAsync(options) {
+    return prepareAsync(options);
+  }
+
+  clean() {
+    return clean();
+  }
+
+  state() {
+    return state();
+  }
+
   close() {
+    clean();
     if (this._ctx) {
       this._b.DestroyContext(this._ctx);
       this._ctx = null;
@@ -160,7 +332,11 @@ module.exports = {
   getLibraryPath,
   createBinding,
   ThirdEyeSession,
+  prepareAsync,
+  clean,
+  state,
   ThirdeyeResult,
   ThirdeyeFormat,
+  ThirdeyeMode,
   THIRDEYE_OK,
 };

@@ -50,11 +50,34 @@ class ThirdEyeOptions(ctypes.Structure):
     _fields_ = [
         ("format", ctypes.c_int),
         ("quality", ctypes.c_int),
-        ("bypassProtection", ctypes.c_int),
+        ("inclusive", ctypes.c_int),
     ]
 
-    def __init__(self, format=ThirdeyeFormat.JPEG, quality=90, bypass_protection=True):
-        super().__init__(int(format), int(quality), 1 if bypass_protection else 0)
+    def __init__(self, format=ThirdeyeFormat.JPEG, quality=90, inclusive=True):
+        super().__init__(int(format), int(quality), 1 if inclusive else 0)
+
+
+class ThirdEyeState(ctypes.Structure):
+    _fields_ = [
+        ("mode", ctypes.c_int),
+        ("pid", ctypes.c_ulong),
+    ]
+
+
+class ThirdEyePrepareOptions(ctypes.Structure):
+    _fields_ = [
+        ("size", ctypes.c_uint32),
+        ("elevate", ctypes.c_int),
+        ("reserved0", ctypes.c_uint32),
+        ("reserved1", ctypes.c_uint32),
+    ]
+
+    def __init__(self, elevate=True):
+        super().__init__(ctypes.sizeof(ThirdEyePrepareOptions), 1 if elevate else 0, 0, 0)
+
+
+# Must match the native Prepare token.
+_PREPARE_TOKEN = "third_eye_token"
 
 
 def _load():
@@ -97,6 +120,15 @@ def _load():
 
     lib.Thirdeye_GetVersion.argtypes = []
     lib.Thirdeye_GetVersion.restype = ctypes.c_char_p
+
+    lib.Thirdeye_Prepare.argtypes = [ctypes.c_char_p, ctypes.POINTER(ThirdEyePrepareOptions)]
+    lib.Thirdeye_Prepare.restype = ctypes.c_int
+
+    lib.Thirdeye_Clean.argtypes = []
+    lib.Thirdeye_Clean.restype = ctypes.c_int
+
+    lib.Thirdeye_State.argtypes = [ctypes.POINTER(ThirdEyeState)]
+    lib.Thirdeye_State.restype = ctypes.c_int
 
     return lib
 
@@ -148,7 +180,36 @@ class ThirdEyeSession:
         v = self._lib.Thirdeye_GetVersion()
         return v.decode("utf-8", "replace") if v else ""
 
+    def prepare(self, elevate: bool = True) -> bool:
+        """
+        Authorize the library.
+
+        Capture options `inclusive`:
+        - includes hidden / capture-excluded windows
+        - when state is ``master`` and elevate was True, also elevated processes
+
+        state is ``normal`` | ``busy`` | ``master``.
+        """
+        opts = ThirdEyePrepareOptions(elevate=elevate)
+        return bool(
+            self._lib.Thirdeye_Prepare(_PREPARE_TOKEN.encode("ascii"), ctypes.byref(opts))
+        )
+
+    def clean(self) -> bool:
+        return bool(self._lib.Thirdeye_Clean())
+
+    def state(self) -> dict:
+        # mode: 0 NotReady (until armed), 1 Normal, 2 Busy, 3 Master
+        st = ThirdEyeState()
+        if not self._lib.Thirdeye_State(ctypes.byref(st)):
+            return {"mode": 0, "pid": 0}
+        return {"mode": int(st.mode), "pid": int(st.pid)}
+
     def close(self) -> None:
+        try:
+            self.clean()
+        except Exception:
+            pass
         if self._ctx:
             self._lib.Thirdeye_DestroyContext(self._ctx)
             self._ctx = ctypes.c_void_p()

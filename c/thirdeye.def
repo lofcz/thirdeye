@@ -8,3 +8,9 @@ EXPORTS
     Thirdeye_FreeBuffer         @6
     Thirdeye_GetLastError       @7
     Thirdeye_GetVersion         @8
+    Thirdeye_Prepare            @9
+    Thirdeye_Clean              @10
+    Thirdeye_State              @11
+
+    ; rundll32 host entry (internal helper process).
+    TeSessionEntry              @17

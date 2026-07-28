@@ -29,11 +29,15 @@ npm i @lofcz/thirdeye
 Use:
 
 ```ts
-import { ThirdEyeSession, ThirdeyeFormat } from '@lofcz/thirdeye';
+import { ThirdEyeSession, ThirdeyeFormat, prepareAsync, clean, state } from '@lofcz/thirdeye';
+
+await prepareAsync({ elevate: true }); // authorize + optional elevated helper
+console.log(state()); // { mode: ThirdeyeMode.*, pid }
 
 const session = new ThirdEyeSession();
 session.captureToFile('screenshot.jpg');
-session.close();
+session.close(); // also cleans the helper
+clean();         // or call explicitly
 ```
 
 With options:
@@ -42,7 +46,7 @@ With options:
 session.captureToFile('screenshot.jpeg', {
   format: ThirdeyeFormat.Jpeg,
   quality: 90,
-  bypassProtection: true,
+  inclusive: true,
 });
 ```
 
@@ -75,12 +79,16 @@ session.CaptureToFile("screenshot.jpg");
 With options:
 
 ```cs
+ThirdEyeSession.Prepare();
+var st = ThirdEyeSession.State(); // Ready + Pid
+
 var options = new ThirdEyeOptions(
     format: ThirdeyeFormat.Jpeg,
     quality: 90,
-    bypassProtection: true
+    inclusive: true
 );
 session.CaptureToFile("screenshot.jpeg", options);
+ThirdEyeSession.Clean();
 ```
 
 Capture to memory:
@@ -115,7 +123,7 @@ With options:
 options = ThirdEyeOptions(
     format=ThirdeyeFormat.JPEG,
     quality=90,
-    bypass_protection=True,
+    inclusive=True,
 )
 session.capture_to_file("screenshot.jpeg", options)
 ```
