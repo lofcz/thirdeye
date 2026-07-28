@@ -29,6 +29,7 @@ class ThirdeyeResult(IntEnum):
     ERROR_ALLOCATION_FAILED = -6
     ERROR_INVALID_PARAM = -7
     ERROR_NO_REMOTE_SECTION = -8
+    ERROR_CAPTURE_FAILED = -9
 
 
 class ThirdeyeFormat(IntEnum):

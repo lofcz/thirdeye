@@ -41,6 +41,7 @@ public class ThirdEyeException : Exception
             ThirdeyeResult.ErrorAllocationFailed => "Memory allocation failed",
             ThirdeyeResult.ErrorInvalidParam => "Invalid parameter",
             ThirdeyeResult.ErrorNoRemoteSection => "No remote section available",
+            ThirdeyeResult.ErrorCaptureFailed => "Screen capture failed",
             _ => $"Unknown error ({(int)result})"
         };
 

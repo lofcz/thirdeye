@@ -19,8 +19,6 @@ function refreshStatus() {
 }
 
 captureBtn.addEventListener('click', async () => {
-  // Each click queues an independent capture; the main process serializes them
-  // and gives each a unique filename, so rapid clicks are never dropped.
   pending += 1;
   refreshStatus();
   try {

@@ -10,6 +10,7 @@ declare module '@lofcz/thirdeye' {
     AllocationFailed = -6,
     InvalidParam = -7,
     NoRemoteSection = -8,
+    CaptureFailed = -9,
   }
 
   /** Pixel/encoder formats supported for captures. */

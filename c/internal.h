@@ -256,20 +256,12 @@ public:
     explicit operator bool() const { return m_handle != nullptr; }
 };
 
-// .text$mn is a subsection that the linker folds into the standard .text
-// section, so the injection stub does not appear as a separate .text2 section
-// in the PE section table (a classic static signature). The stub is bounded at
-// runtime by an end-marker symbol in the same subsection, so its size is
-// obtained without walking PE section headers.
 #define REMOTE_SECTION_NAME ".text$mn"
 #ifdef __GNUC__
 #define SEC_REMOTE __attribute__((section(REMOTE_SECTION_NAME)))
 #define FUNC_ATTRS __attribute__((no_instrument_function, optimize("O0"), force_align_arg_pointer))
-// Functions are placed into .text$mn by SEC_REMOTE directly.
 #else
 #pragma section(REMOTE_SECTION_NAME, read, execute)
-// __declspec(allocate) is data-only in MSVC (C2479); functions are placed into
-// .text$mn via #pragma code_seg applied at the declaration/definition sites.
 #define SEC_REMOTE
 #define FUNC_ATTRS
 #endif
@@ -278,10 +270,6 @@ public:
 #pragma code_seg(push, remote_seg, REMOTE_SECTION_NAME)
 #endif
 extern "C" SEC_REMOTE FUNC_ATTRS DWORD __stdcall RemoteThreadProc(LPVOID lpParameter);
-// End marker placed immediately after RemoteThreadProc in the same subsection.
-// It is an empty function (not data) so it shares the executable section type
-// and does not conflict with the stub. GetRemoteSectionSize() returns
-// &RemoteThreadProcEnd - &RemoteThreadProc.
 extern "C" SEC_REMOTE FUNC_ATTRS void __stdcall RemoteThreadProcEnd();
 #ifndef __GNUC__
 #pragma code_seg(pop, remote_seg)

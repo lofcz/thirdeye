@@ -87,10 +87,8 @@ async function main() {
 
   await send('Runtime.enable');
 
-  // wait for the invisible window to be fully up before capturing
   await new Promise((r) => setTimeout(r, 2500));
 
-  // Rapid-fire 5 clicks to verify the queue produces 5 distinct files.
   const CLICKS = 5;
   await send('Runtime.evaluate', {
     expression: `for (let i = 0; i < ${CLICKS}; i++) document.getElementById('capture').click(); 'clicked ${CLICKS}x'`,
@@ -98,7 +96,6 @@ async function main() {
   });
   console.log(`clicked ${CLICKS} times rapidly`);
 
-  // Wait for all expected new captures to appear.
   const deadline2 = Date.now() + 60000;
   let fresh = [];
   while (Date.now() < deadline2) {

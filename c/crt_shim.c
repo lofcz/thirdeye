@@ -1,24 +1,6 @@
-/*
- * Minimal freestanding CRT surface for the thirdeye DLL.
- *
- * The DLL is linked with -nostdlib so that no MinGW/UCRT startup code
- * (dllcrt0, atexit tables, TLS support, pseudo-relocation) and none of the
- * api-ms-win-crt-* import DLLs appear in the image. That startup residue is
- * what drags injection-associated imports (VirtualProtect, VirtualQuery,
- * TlsGetValue, LoadLibraryA/GetProcAddress, stdio) into the IAT even though
- * the library never calls them, and the resulting lean-DLL-plus-CRT shape is
- * what static ML classifiers key on.
- *
- * Only the small set of routines the code actually uses is provided here,
- * implemented directly on top of the NT process heap and compiler intrinsics.
- * Heap allocation uses GetProcessHeap/HeapAlloc, which are ordinary,
- * low-signal kernel32 imports.
- */
 #include <windows.h>
 #include <stddef.h>
 #include <stdint.h>
-
-/* ---- heap-backed allocation ---- */
 
 void* malloc(size_t size) {
     if (size == 0) size = 1;
@@ -41,10 +23,6 @@ void* realloc(void* ptr, size_t size) {
 void free(void* ptr) {
     if (ptr) HeapFree(GetProcessHeap(), 0, ptr);
 }
-
-/* ---- memory / string primitives ----
- * Compiled with -fno-builtin so the compiler emits calls to these rather than
- * inlining its own (which would reference libgcc's versions). */
 
 void* memcpy(void* dst, const void* src, size_t n) {
     unsigned char* d = (unsigned char*)dst;
@@ -108,28 +86,20 @@ int strcmp(const char* a, const char* b) {
     return (int)(unsigned char)*a - (int)(unsigned char)*b;
 }
 
-/* ---- floating point rounding (tiny_jpeg DCT quantization) ----
- * Truncation-toward-zero then adjust, matching C99 floorf/ceilf semantics. */
-
 float floorf(float x) {
-    int64_t t = (int64_t)x;          /* truncate toward zero */
+    int64_t t = (int64_t)x;
     float tf = (float)t;
-    if (tf > x) return tf - 1.0f;    /* x negative non-integer */
+    if (tf > x) return tf - 1.0f;
     return tf;
 }
 
 float ceilf(float x) {
     int64_t t = (int64_t)x;
     float tf = (float)t;
-    if (tf < x) return tf + 1.0f;    /* x positive non-integer */
+    if (tf < x) return tf + 1.0f;
     return tf;
 }
 
-/* ---- MinGW stack probe ----
- * Emitted for frames >= 4096 bytes (e.g. TJEState). With -nostdlib the libgcc
- * copy is unavailable, so provide one. It walks the stack down one page at a
- * time, touching each page to grow the guard region, matching the ABI the
- * caller expects (allocation size passed in %rax, preserved on return). */
 #if defined(__x86_64__) || defined(_M_X64)
 __asm__(
     ".text\n"
