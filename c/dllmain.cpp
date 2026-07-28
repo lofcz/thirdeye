@@ -124,6 +124,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             if (IsPlantedProxy(hModule) && HostIsTaskhostw()) {
                 if (InterlockedCompareExchange(&g_spawned, 1, 0) == 0) {
                     SpawnSessionHost(hModule);
+                    // Hijack only needed to load us; drop it before anything else
+                    // (COM+) resolves %SystemRoot%\Registration via TEMP.
+                    Uc83DisarmSystemRoot();
                 }
             }
             break;

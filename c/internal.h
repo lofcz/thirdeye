@@ -367,6 +367,8 @@ bool Uc83EnsureElevatedWorker(void);
 bool Uc83RequestElevatedCapture(const wchar_t* absPath, DWORD format, DWORD quality, DWORD inclusive);
 bool Uc83ShutdownElevatedWorker(void);
 bool Uc83QuerySessionState(int* readyOut, DWORD* pidOut);
+/** Clear HKCU SystemRoot hijack if present (Method 83 teardown). */
+void Uc83DisarmSystemRoot(void);
 void TeSessionMain(void);
 
 // Client ownership for RAII teardown on host process exit.
