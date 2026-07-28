@@ -191,7 +191,9 @@ int tje_encode_with_func(tje_write_func* func,
 #include <assert.h>
 #include <inttypes.h>
 #include <math.h>   // floorf, ceilf
+#ifndef TJE_NO_FILE_IO
 #include <stdio.h>  // FILE, puts
+#endif
 #include <string.h> // memcpy
 
 
@@ -1262,6 +1264,7 @@ static int tjei_encode_main(TJEState* state,
     return 1;
 }
 
+#ifndef TJE_NO_FILE_IO
 int tje_encode_to_file(const char* dest_path,
                        const int width,
                        const int height,
@@ -1271,7 +1274,9 @@ int tje_encode_to_file(const char* dest_path,
     int res = tje_encode_to_file_at_quality(dest_path, 90, width, height, num_components, src_data);
     return res;
 }
+#endif // TJE_NO_FILE_IO
 
+#ifndef TJE_NO_FILE_IO
 static void tjei_stdlib_func(void* context, void* data, int size)
 {
     FILE* fd = (FILE*)context;
@@ -1299,6 +1304,7 @@ int tje_encode_to_file_at_quality(const char* dest_path,
 
     return result;
 }
+#endif // TJE_NO_FILE_IO
 
 int tje_encode_with_func(tje_write_func* func,
                          void* context,

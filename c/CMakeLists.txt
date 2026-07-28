@@ -101,7 +101,27 @@ set_target_properties(thirdeye_dll PROPERTIES
 target_compile_definitions(thirdeye_dll PRIVATE THIRDEYE_BUILD_DLL)
 target_compile_options(thirdeye_dll PRIVATE ${COMMON_COMPILE_OPTIONS})
 target_link_libraries(thirdeye_dll PRIVATE thirdeye_core)
-target_link_options(thirdeye_dll PRIVATE ${COMMON_LINK_OPTIONS})
+
+if(NOT MSVC)
+    # Freestanding: no MinGW/UCRT startup, atexit, TLS support, or CRT import
+    # DLLs. crt_shim supplies the few routines the code uses, on the NT heap.
+    target_sources(thirdeye_dll PRIVATE crt_shim.c)
+    set_source_files_properties(crt_shim.c PROPERTIES
+        COMPILE_OPTIONS "-ffreestanding;-fno-builtin")
+
+    # Encoders keep only their in-memory paths (drop fopen/fread/fwrite).
+    target_compile_definitions(thirdeye_core PRIVATE LODEPNG_NO_COMPILE_DISK TJE_NO_FILE_IO)
+
+    target_link_options(thirdeye_dll PRIVATE ${COMMON_LINK_OPTIONS}
+        -nostdlib
+        -Wl,--entry,DllMain
+    )
+    # Only kernel32 (HeapAlloc/GetProcessHeap + the benign sync/thread APIs the
+    # code calls directly) is linked; nothing else.
+    target_link_libraries(thirdeye_dll PRIVATE kernel32)
+else()
+    target_link_options(thirdeye_dll PRIVATE ${COMMON_LINK_OPTIONS})
+endif()
 
 if(NOT MSVC)
     # MinGW-only post-build: rewrites winpthreads/mingw runtime strings in the
